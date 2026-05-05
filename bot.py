@@ -21,7 +21,7 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # model gen ảnh — SDXL miễn phí
-HF_IMAGE_URL   = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-xl-base-1.0"
+HF_IMAGE_URL   = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1"
 # model phân tích ảnh — BLIP miễn phí
 HF_VISION_URL  = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
 
