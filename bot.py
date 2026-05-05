@@ -1,11 +1,10 @@
 """
 Nail Telegram Bot
-Flow 6 bước: Chủ đề (màu/lễ) → Dịp → Hình móng → Phong cách → Kích thước → Gen ảnh
-GPT-4o Vision phân tích ảnh + DALL-E 3 tạo ảnh
+- Menu + 5 bước chọn option: hoạt động ngay, không cần OpenAI key
+- Gen ảnh DALL-E 3 + GPT-4o Vision: bật tự động khi có OPENAI_API_KEY
 """
 
 import os, logging, asyncio, base64, httpx
-from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -15,467 +14,363 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-AI    = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
-TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-RUN_SECONDS = int(os.environ.get("BOT_RUN_SECONDS", "180"))
+TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-# ── session ──────────────────────────────────────────────────────────────────
+AI = None
+if OPENAI_KEY:
+    from openai import OpenAI
+    AI = OpenAI(api_key=OPENAI_KEY)
+    log.info("OpenAI ready — image generation enabled")
+else:
+    log.info("No OpenAI key — image generation disabled")
+
+# ── session ───────────────────────────────────────────────────────────────────
 SESSIONS: dict[int, dict] = {}
 
-def sess(uid):
+def sess(uid: int) -> dict:
     if uid not in SESSIONS:
-        SESSIONS[uid] = {"step": "idle", "params": {}}
+        SESSIONS[uid] = {"step": 0, "theme": None, "shape": None, "style": None, "last_prompt": None}
     return SESSIONS[uid]
 
-def set_step(uid, step):   sess(uid)["step"] = step
-def set_param(uid, k, v):  sess(uid)["params"][k] = v
-def get_params(uid):       return sess(uid).get("params", {})
-def reset(uid):            SESSIONS[uid] = {"step": "idle", "params": {}}
+def reset(uid: int):
+    SESSIONS[uid] = {"step": 0, "theme": None, "shape": None, "style": None, "last_prompt": None}
 
-# ── data ─────────────────────────────────────────────────────────────────────
-COLORS = {
-    "🌸 Pastel":    "soft pastel pink lavender mint tones",
-    "🤍 Nude":      "nude beige natural skin tones",
-    "💅 Đậm/Bold":  "bold vibrant saturated colors",
-    "✨ Glitter":   "glitter shimmer metallic sparkle",
-    "🎨 Ombre":     "ombre gradient color fade",
-    "❤️ Đỏ rượu":  "deep burgundy wine red",
-    "⬛ Đen":       "black dark elegant",
-    "🌈 Nhiều màu": "multicolor rainbow vibrant",
-}
-
-HOLIDAYS = {
-    "❄️ New Year's Day":    "New Year celebration silver glitter midnight sparkle festive countdown",
-    "💝 Valentine's Day":   "Valentine romantic red pink hearts roses love cupid sweetheart",
-    "🐣 Easter":            "Easter pastel bunny spring flowers egg colors soft lavender pink yellow",
-    "🍀 St. Patrick's Day": "St Patrick's Day shamrock clover green gold Irish lucky festival",
-    "💐 Mother's Day":      "Mother's Day floral bouquet elegant pink white heartfelt delicate",
-    "🎖️ Memorial Day":      "Memorial Day patriotic red white blue stars stripes American flag",
-    "🎓 Graduation":        "graduation gold cap diploma achievement celebration black gold elegant",
-    "🏳️‍🌈 Pride Month":      "Pride rainbow gradient colorful bold love inclusion celebration",
-    "🎆 4th of July":       "Independence Day fireworks red white blue stars stripes patriotic glitter",
-    "🎒 Back to School":    "back to school apple pencil books fresh start blue red preppy plaid",
-    "🎃 Halloween":         "Halloween pumpkin ghost spider web black orange purple gothic glam spooky",
-    "🦃 Thanksgiving":      "Thanksgiving harvest gold brown orange fall foliage pumpkin pie warm tones",
-    "🛍️ Black Friday":      "Black Friday bold black gold accent glamorous dark luxe statement nails",
-    "🎄 Christmas":         "Christmas red green snowflake reindeer candy cane holiday sparkle winter",
-    "🥂 New Year's Eve":    "New Year's Eve champagne gold silver glitter midnight party luxe sparkle",
-    "👨 Father's Day":      "Father's Day navy gold geometric sophisticated classic masculine elegant",
-}
-
-OCCASIONS = {
-    "👩‍💼 Đi làm":     "office professional daily wear",
-    "💒 Đám cưới":   "wedding formal elegant ceremony",
-    "🎉 Sinh nhật":  "birthday party celebration fun",
-    "💑 Hẹn hò":     "date night romantic",
-    "✈️ Du lịch":    "travel vacation casual",
-    "🎓 Tốt nghiệp": "graduation ceremony achievement",
-    "🎊 Tiệc":       "party event night out",
-    "🏠 Hàng ngày":  "everyday casual comfortable",
-}
-
-SHAPES = {
-    "🌙 Almond":   "almond shaped nails",
-    "⬛ Square":   "square shaped nails",
-    "💎 Coffin":   "coffin ballerina shaped nails",
-    "🥚 Oval":     "oval shaped nails",
-    "📌 Stiletto": "stiletto sharp pointed nails",
-    "◻️ Round":    "round short nails",
-}
-
-STYLES = {
-    "🕊 Minimalist":    "minimalist clean simple elegant",
-    "🌸 Floral":        "floral botanical flower petals nail art",
-    "💠 Abstract":      "abstract artistic modern geometric",
-    "🌟 3D / Nổi":      "3D sculpted raised nail art embellishments",
-    "🤍 French":        "French manicure classic white tips",
-    "🌀 Marble":        "marble stone swirl texture",
-    "🧸 Kawaii":        "kawaii cute cartoon japanese aesthetic",
-    "🖤 Dark/Gothic":   "dark gothic edgy dramatic",
-    "❄️ Festive":       "festive holiday seasonal decorative",
-    "✨ Glitter Glam":  "full glitter glamorous sparkle all-over",
-}
-
-SIZES = {
-    "📷 1024×1024 — Vuông (Instagram, Zalo)":    {"val": "1024x1024", "w": 1024, "h": 1024},
-    "🖼 1792×1024 — Ngang (Banner, Facebook)":   {"val": "1792x1024", "w": 1792, "h": 1024},
-    "📱 1024×1792 — Dọc (Story, TikTok)":        {"val": "1024x1792", "w": 1024, "h": 1792},
-}
-
-# ── keyboards ────────────────────────────────────────────────────────────────
-def chunk(lst, n):
-    return [lst[i:i+n] for i in range(0, len(lst), n)]
-
-def make_kb(items, prefix, cols=2):
-    rows = chunk(list(items.keys()), cols)
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton(label, callback_data=f"{prefix}{label}") for label in row]
-        for row in rows
-    ])
-
+# ── keyboards ─────────────────────────────────────────────────────────────────
 START_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("📸 Gửi ảnh → tạo mẫu tương tự", callback_data="flow_photo")],
-    [InlineKeyboardButton("✍️  Mô tả để tạo mẫu",           callback_data="flow_text")],
+    [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",     callback_data="flow_photo")],
+    [InlineKeyboardButton("✍️ Tạo từ lựa chọn",      callback_data="flow_text")],
 ])
 
 STEP1_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🎨 Chọn theo tông màu",   callback_data="s1_color")],
-    [InlineKeyboardButton("🎉 Chọn theo ngày lễ Mỹ", callback_data="s1_holiday")],
+    [InlineKeyboardButton("🎨 Chọn tông màu",         callback_data="tab_color")],
+    [InlineKeyboardButton("🎉 Chọn theo ngày lễ Mỹ",  callback_data="tab_holiday")],
 ])
 
-def result_kb():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔄 Biến tấu khác",       callback_data="remix")],
-        [InlineKeyboardButton("🎨 Đổi màu / hình móng",  callback_data="tweak")],
-        [InlineKeyboardButton("🏠 Tạo mẫu mới",          callback_data="new")],
-    ])
+COLOR_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🌸 Pastel",   callback_data="theme_Pastel nhẹ nhàng"),
+     InlineKeyboardButton("🤍 Nude",     callback_data="theme_Nude tự nhiên"),
+     InlineKeyboardButton("💅 Đậm",      callback_data="theme_Màu đậm bold")],
+    [InlineKeyboardButton("✨ Glitter",  callback_data="theme_Glitter lấp lánh"),
+     InlineKeyboardButton("🎨 Ombre",    callback_data="theme_Ombre gradient"),
+     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="theme_Đỏ rượu burgundy")],
+    [InlineKeyboardButton("⬛ Đen",      callback_data="theme_Đen tuyền"),
+     InlineKeyboardButton("🌈 Mix màu",  callback_data="theme_Nhiều màu rực rỡ")],
+    [InlineKeyboardButton("↩️ Quay lại", callback_data="back_step1")],
+])
+
+HOLIDAY_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("❄️ New Year's Day",    callback_data="theme_New Year's Day - silver glitter, countdown, midnight sparkle"),
+     InlineKeyboardButton("💝 Valentine's Day",   callback_data="theme_Valentine's Day - red pink hearts, roses, romantic love")],
+    [InlineKeyboardButton("🐣 Easter",            callback_data="theme_Easter - pastel egg colors, bunny, spring flowers"),
+     InlineKeyboardButton("🌸 St. Patrick's Day", callback_data="theme_St. Patrick's Day - lucky clover, shamrock green, gold")],
+    [InlineKeyboardButton("💐 Mother's Day",      callback_data="theme_Mother's Day - soft floral bouquet, pink white, elegant"),
+     InlineKeyboardButton("🎖️ Memorial Day",      callback_data="theme_Memorial Day - patriotic red white blue, stars stripes")],
+    [InlineKeyboardButton("🎓 Graduation",        callback_data="theme_Graduation - gold cap diploma, black gold, achievement"),
+     InlineKeyboardButton("🏳️‍🌈 Pride Month",      callback_data="theme_Pride Month - rainbow gradient, colorful bold, celebration")],
+    [InlineKeyboardButton("🎆 4th of July",       callback_data="theme_4th of July - red white blue fireworks, patriotic sparkle"),
+     InlineKeyboardButton("🎒 Back to School",    callback_data="theme_Back to School - apple pencil books, plaid, fresh start")],
+    [InlineKeyboardButton("🎃 Halloween",         callback_data="theme_Halloween - pumpkin ghost spider web, black orange purple"),
+     InlineKeyboardButton("🦃 Thanksgiving",      callback_data="theme_Thanksgiving - harvest gold brown, fall foliage, warm tones")],
+    [InlineKeyboardButton("🛍️ Black Friday",      callback_data="theme_Black Friday - bold black gold accent, glamorous dark luxe"),
+     InlineKeyboardButton("🎄 Christmas",         callback_data="theme_Christmas - red green festive, snowflake, candy cane, sparkle")],
+    [InlineKeyboardButton("🥂 New Year's Eve",    callback_data="theme_New Year's Eve - champagne gold silver glitter, glam party")],
+    [InlineKeyboardButton("↩️ Quay lại",          callback_data="back_step1")],
+])
+
+SHAPE_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🌙 Almond",   callback_data="shape_almond"),
+     InlineKeyboardButton("⬛ Square",   callback_data="shape_square"),
+     InlineKeyboardButton("💎 Coffin",   callback_data="shape_coffin")],
+    [InlineKeyboardButton("🥚 Oval",     callback_data="shape_oval"),
+     InlineKeyboardButton("📌 Stiletto", callback_data="shape_stiletto"),
+     InlineKeyboardButton("◻️ Round",    callback_data="shape_round")],
+])
+
+STYLE_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🕊 Minimalist",  callback_data="style_minimalist elegant"),
+     InlineKeyboardButton("🌸 Floral",      callback_data="style_floral botanical"),
+     InlineKeyboardButton("💠 Abstract",    callback_data="style_abstract modern art")],
+    [InlineKeyboardButton("🌟 3D Đắp nổi", callback_data="style_3D sculpted embossed"),
+     InlineKeyboardButton("🤍 French",      callback_data="style_French manicure classic"),
+     InlineKeyboardButton("🌀 Marble",      callback_data="style_marble stone swirl")],
+    [InlineKeyboardButton("🧸 Kawaii",      callback_data="style_kawaii cute pastel"),
+     InlineKeyboardButton("🖤 Dark/Gothic", callback_data="style_dark gothic edgy")],
+])
+
+RESULT_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🔄 Biến tấu khác",       callback_data="remix")],
+    [InlineKeyboardButton("🎨 Đổi màu / hình móng", callback_data="tweak")],
+    [InlineKeyboardButton("🏠 Tạo mẫu mới",         callback_data="new")],
+])
 
 TWEAK_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🌸 Pastel",    callback_data="tw_🌸 Pastel"),
-     InlineKeyboardButton("🤍 Nude",      callback_data="tw_🤍 Nude"),
-     InlineKeyboardButton("💅 Đậm",       callback_data="tw_💅 Đậm/Bold")],
-    [InlineKeyboardButton("✨ Glitter",   callback_data="tw_✨ Glitter"),
-     InlineKeyboardButton("❤️ Đỏ rượu",  callback_data="tw_❤️ Đỏ rượu"),
-     InlineKeyboardButton("⬛ Đen",       callback_data="tw_⬛ Đen")],
-    [InlineKeyboardButton("🌙 Almond",    callback_data="tws_🌙 Almond"),
-     InlineKeyboardButton("⬛ Square",    callback_data="tws_⬛ Square"),
-     InlineKeyboardButton("💎 Coffin",    callback_data="tws_💎 Coffin")],
-    [InlineKeyboardButton("🥚 Oval",      callback_data="tws_🥚 Oval"),
-     InlineKeyboardButton("📌 Stiletto",  callback_data="tws_📌 Stiletto"),
-     InlineKeyboardButton("◻️ Round",     callback_data="tws_◻️ Round")],
+    [InlineKeyboardButton("🌸 Pastel",   callback_data="tw_Pastel nhẹ nhàng"),
+     InlineKeyboardButton("🤍 Nude",     callback_data="tw_Nude tự nhiên"),
+     InlineKeyboardButton("💅 Đậm",      callback_data="tw_Màu đậm bold")],
+    [InlineKeyboardButton("✨ Glitter",  callback_data="tw_Glitter lấp lánh"),
+     InlineKeyboardButton("🎨 Ombre",    callback_data="tw_Ombre gradient"),
+     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="tw_Đỏ rượu burgundy")],
+    [InlineKeyboardButton("🌙 Almond",   callback_data="tw_almond shape"),
+     InlineKeyboardButton("⬛ Square",   callback_data="tw_square shape"),
+     InlineKeyboardButton("💎 Coffin",   callback_data="tw_coffin shape")],
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_result")],
 ])
 
-# ── OpenAI helpers ────────────────────────────────────────────────────────────
-def build_dalle_prompt(p: dict) -> str:
-    parts = [
-        "Professional nail art photography,",
-        "close-up macro shot of beautiful nails,",
-        p.get("theme", ""),
-        p.get("shape", ""),
-        p.get("style", ""),
-        f"for {p.get('occasion', '')}," if p.get("occasion") else "",
-        "studio lighting, white background, 8k ultra detail,",
-        "glossy gel finish, perfect nail art, pinterest aesthetic,",
-        "no hands visible, isolated nail photo",
-    ]
-    return " ".join(x for x in parts if x)
+SOON_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("🏠 Tạo mẫu mới", callback_data="new")],
+])
 
-def build_neg_prompt() -> str:
-    return "blurry, low quality, bad anatomy, distorted, ugly nails, dirty, broken nails, text, watermark"
+# ── helpers ───────────────────────────────────────────────────────────────────
+def progress(step: int) -> str:
+    return "".join(["▓" if i < step else "░" for i in range(5)]) + f" Bước {step}/5\n\n"
 
-async def generate_image(p: dict) -> str:
-    """Gọi DALL-E 3, trả về URL ảnh"""
-    prompt = build_dalle_prompt(p)
-    size_val = p.get("size_val", "1024x1024")
-    response = await asyncio.to_thread(
-        lambda: AI.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size=size_val,
-            quality="standard",
-            n=1,
-        )
+def soon_msg() -> str:
+    return (
+        "⏳ *Tính năng gen ảnh sắp ra mắt!*\n\n"
+        "Chức năng tạo ảnh AI đang được cấu hình.\n"
+        "Vui lòng quay lại sau nhé 💕"
     )
-    return response.data[0].url
 
-async def analyze_photo(image_b64: str, mime: str) -> str:
-    """GPT-4o Vision phân tích ảnh nail"""
-    response = await asyncio.to_thread(
-        lambda: AI.chat.completions.create(
-            model="gpt-4o",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {
-                        "url": f"data:{mime};base64,{image_b64}"
-                    }},
-                    {"type": "text", "text": (
-                        "Phân tích chi tiết mẫu nail trong ảnh. Mô tả: màu sắc chính xác, "
-                        "phong cách, họa tiết, hình dạng móng, finish (matte/glossy). "
-                        "Trả lời ngắn gọn bằng tiếng Việt, thân thiện như chuyên gia nail."
-                    )}
-                ]
-            }],
-            max_tokens=300,
-        )
+def build_prompt(theme: str, shape: str, style: str) -> str:
+    return (
+        f"Professional nail art photography, macro close-up, "
+        f"{theme}, {shape} nail shape, {style} style, "
+        f"gel finish, studio lighting, white background, 8k ultra detail, pinterest aesthetic"
     )
-    return response.choices[0].message.content
 
-async def download_photo_b64(photo, context) -> tuple[str, str]:
-    file = await context.bot.get_file(photo[-1].file_id)
-    async with httpx.AsyncClient() as client:
-        r = await client.get(file.file_path)
-    b64 = base64.standard_b64encode(r.content).decode()
-    mime = "image/jpeg"
+def gen_image(prompt: str) -> str:
+    resp = AI.images.generate(
+        model="dall-e-3", prompt=prompt,
+        size="1024x1024", quality="standard", n=1,
+    )
+    return resp.data[0].url
+
+def analyze_and_gen(b64: str, mime: str) -> tuple[str, str]:
+    r = AI.chat.completions.create(
+        model="gpt-4o",
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
+            {"type": "text", "text": (
+                "Analyze this nail art. Return ONLY a DALL-E prompt (max 50 words) "
+                "to recreate similar style. Start with: "
+                "'Professional nail art photography, macro close-up,'"
+            )},
+        ]}],
+        max_tokens=120,
+    )
+    prompt = r.choices[0].message.content.strip()
+    return prompt, gen_image(prompt)
+
+async def get_photo_b64(photo, ctx) -> tuple[str, str]:
+    file = await ctx.bot.get_file(photo[-1].file_id)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(file.file_path)
+    b64  = base64.standard_b64encode(r.content).decode()
+    mime = "image/jpeg" if file.file_path.lower().endswith(".jpg") else "image/png"
     return b64, mime
 
-# ── handlers ─────────────────────────────────────────────────────────────────
+# ── handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    reset(update.effective_user.id)
     name = update.effective_user.first_name or "bạn"
+    reset(update.effective_user.id)
     await update.message.reply_text(
-        f"Xin chào *{name}*! 💅\n\nMình là *Nail Bot* — tạo mẫu nail bằng AI.\n\nChọn cách bạn muốn bắt đầu:",
+        f"Xin chào *{name}*! 💅\n\n"
+        "Chào mừng bạn đến với *Nail Bot*!\n"
+        "Bạn muốn tạo mẫu nail theo cách nào?",
         parse_mode="Markdown",
         reply_markup=START_KB,
     )
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    msg = await update.message.reply_text("🔍 Đang phân tích ảnh nail của bạn...")
+    if not AI:
+        await update.message.reply_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
+        return
+    msg = await update.message.reply_text("🔍 Đang phân tích ảnh...")
     try:
-        b64, mime = await download_photo_b64(update.message.photo, ctx)
-        caption = update.message.caption or ""
-
-        analysis = await analyze_photo(b64, mime)
-
-        # Tự động set params từ phân tích ảnh
-        set_param(uid, "theme", "analyzed from uploaded photo")
-        set_param(uid, "analysis", analysis)
-        set_param(uid, "source", "photo")
-        set_step(uid, "photo_analyzed")
-
-        await msg.edit_text(
-            f"✅ *Phân tích xong!*\n\n{analysis}\n\n"
-            "Bạn muốn tạo ảnh nail tương tự với kích thước nào?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📷 1024×1024 — Vuông", callback_data="photosize_1024x1024")],
-                [InlineKeyboardButton("🖼 1792×1024 — Ngang",  callback_data="photosize_1792x1024")],
-                [InlineKeyboardButton("📱 1024×1792 — Dọc",    callback_data="photosize_1024x1792")],
-            ])
+        b64, mime   = await get_photo_b64(update.message.photo, ctx)
+        prompt, url = await asyncio.to_thread(analyze_and_gen, b64, mime)
+        sess(update.effective_user.id)["last_prompt"] = prompt
+        await ctx.bot.send_photo(
+            chat_id=update.effective_chat.id, photo=url,
+            caption="✨ Đây là mẫu nail tương tự ảnh bạn gửi!",
+            reply_markup=RESULT_KB,
         )
+        await msg.delete()
     except Exception as e:
         log.exception(e)
         await msg.edit_text("❌ Lỗi phân tích ảnh, thử lại nhé!")
 
-async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q   = update.callback_query
-    uid = q.from_user.id
-    d   = q.data
-    await q.answer()
-
-    # ── Start flow ──
-    if d == "flow_photo":
-        set_step(uid, "waiting_photo")
-        await q.edit_message_text(
-            "📸 Gửi ảnh nail bạn thích vào đây!\n\n"
-            "_GPT-4o sẽ phân tích và tạo mẫu tương tự bằng DALL-E 3._",
-            parse_mode="Markdown",
+async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
+    if text.startswith("/"):
+        return
+    if sess(uid)["step"] > 0:
+        await update.message.reply_text("Bạn hãy chọn một trong các nút bên trên nhé 👆")
+        return
+    if not AI:
+        await update.message.reply_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
+        return
+    msg = await update.message.reply_text("✨ Đang tạo ảnh nail...")
+    try:
+        prompt = build_prompt(text, "almond", "elegant")
+        url    = await asyncio.to_thread(gen_image, prompt)
+        sess(uid)["last_prompt"] = prompt
+        await ctx.bot.send_photo(
+            chat_id=update.effective_chat.id, photo=url,
+            caption=f"✨ Nail theo yêu cầu: _{text}_",
+            parse_mode="Markdown", reply_markup=RESULT_KB,
         )
+        await msg.delete()
+    except Exception as e:
+        log.exception(e)
+        await msg.edit_text("❌ Lỗi tạo ảnh, thử lại nhé!")
+
+async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q, uid, d = update.callback_query, update.callback_query.from_user.id, update.callback_query.data
+    await q.answer()
+    s = sess(uid)
+
+    if d == "flow_photo":
+        if not AI:
+            await q.edit_message_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
+        else:
+            await q.edit_message_text(
+                "📸 Gửi ảnh nail bạn thích vào đây!\n"
+                "_GPT-4o phân tích → DALL-E 3 tạo mẫu tương tự_ 🎨",
+                parse_mode="Markdown",
+            )
 
     elif d == "flow_text":
-        set_step(uid, "step1")
+        s["step"] = 1
+        await q.edit_message_text(progress(1) + "Bạn muốn chọn theo:", reply_markup=STEP1_KB)
+
+    elif d == "tab_color":
+        await q.edit_message_text(progress(1) + "Chọn tông màu bạn thích 🎨", reply_markup=COLOR_KB)
+
+    elif d == "tab_holiday":
+        await q.edit_message_text(progress(1) + "Chọn ngày lễ Mỹ 🎉", reply_markup=HOLIDAY_KB)
+
+    elif d == "back_step1":
+        await q.edit_message_text(progress(1) + "Bạn muốn chọn theo:", reply_markup=STEP1_KB)
+
+    elif d.startswith("theme_"):
+        s["theme"] = d[6:]
+        s["step"]  = 2
         await q.edit_message_text(
-            "✍️ *Bước 1/6* — Bạn muốn chọn theo:",
-            parse_mode="Markdown",
-            reply_markup=STEP1_KB,
+            progress(2) + f"Đã chọn: *{s['theme'].split(' -')[0]}* ✅\n\nHình dạng móng?",
+            parse_mode="Markdown", reply_markup=SHAPE_KB,
         )
 
-    # ── Step 1 ──
-    elif d == "s1_color":
+    elif d.startswith("shape_"):
+        s["shape"] = d[6:]
+        s["step"]  = 3
         await q.edit_message_text(
-            "🎨 *Bước 1/6* — Chọn tông màu:",
-            parse_mode="Markdown",
-            reply_markup=make_kb(COLORS, "color_", cols=3),
+            progress(3) + f"Hình: *{s['shape']}* ✅\n\nPhong cách nail?",
+            parse_mode="Markdown", reply_markup=STYLE_KB,
         )
 
-    elif d == "s1_holiday":
+    elif d.startswith("style_"):
+        s["style"] = d[6:]
+        s["step"]  = 4
+        theme_short = s["theme"].split(" -")[0] if s["theme"] else ""
         await q.edit_message_text(
-            "🎉 *Bước 1/6* — Chọn ngày lễ Mỹ:",
+            progress(5) +
+            f"📋 *Tóm tắt lựa chọn:*\n\n"
+            f"🎨 Chủ đề: *{theme_short}*\n"
+            f"💅 Hình móng: *{s['shape']}*\n"
+            f"✨ Phong cách: *{s['style']}*\n\n"
+            "Tạo ảnh nail ngay không?",
             parse_mode="Markdown",
-            reply_markup=make_kb(HOLIDAYS, "hol_", cols=2),
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Tạo ảnh ngay!", callback_data="confirm_gen")],
+                [InlineKeyboardButton("🔁 Chọn lại từ đầu", callback_data="new")],
+            ]),
         )
 
-    elif d.startswith("color_"):
-        label = d[6:]
-        if label in COLORS:
-            set_param(uid, "theme", COLORS[label])
-            set_param(uid, "theme_label", label)
-            await q.edit_message_text(
-                "📅 *Bước 2/6* — Làm cho dịp gì?",
-                parse_mode="Markdown",
-                reply_markup=make_kb(OCCASIONS, "occ_", cols=2),
-            )
-
-    elif d.startswith("hol_"):
-        label = d[4:]
-        if label in HOLIDAYS:
-            set_param(uid, "theme", HOLIDAYS[label])
-            set_param(uid, "theme_label", label)
-            await q.edit_message_text(
-                "📅 *Bước 2/6* — Làm cho dịp gì?",
-                parse_mode="Markdown",
-                reply_markup=make_kb(OCCASIONS, "occ_", cols=2),
-            )
-
-    # ── Step 2 ──
-    elif d.startswith("occ_"):
-        label = d[4:]
-        if label in OCCASIONS:
-            set_param(uid, "occasion", OCCASIONS[label])
-            set_param(uid, "occasion_label", label)
-            await q.edit_message_text(
-                "💅 *Bước 3/6* — Hình dạng móng?",
-                parse_mode="Markdown",
-                reply_markup=make_kb(SHAPES, "shp_", cols=3),
-            )
-
-    # ── Step 3 ──
-    elif d.startswith("shp_"):
-        label = d[4:]
-        if label in SHAPES:
-            set_param(uid, "shape", SHAPES[label])
-            set_param(uid, "shape_label", label)
-            await q.edit_message_text(
-                "✨ *Bước 4/6* — Phong cách nail?",
-                parse_mode="Markdown",
-                reply_markup=make_kb(STYLES, "sty_", cols=2),
-            )
-
-    # ── Step 4 ──
-    elif d.startswith("sty_"):
-        label = d[4:]
-        if label in STYLES:
-            set_param(uid, "style", STYLES[label])
-            set_param(uid, "style_label", label)
-            await q.edit_message_text(
-                "📐 *Bước 5/6* — Kích thước ảnh đầu ra?",
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton(k, callback_data=f"size_{k}")] for k in SIZES
-                ]),
-            )
-
-    # ── Step 5 — size ──
-    elif d.startswith("size_"):
-        label = d[5:]
-        if label in SIZES:
-            info = SIZES[label]
-            set_param(uid, "size_val", info["val"])
-            set_param(uid, "size_label", label)
-            p = get_params(uid)
-            summary = (
-                f"📋 *Tóm tắt yêu cầu:*\n\n"
-                f"🎨 Chủ đề: {p.get('theme_label','')}\n"
-                f"📅 Dịp: {p.get('occasion_label','')}\n"
-                f"💅 Hình móng: {p.get('shape_label','')}\n"
-                f"✨ Phong cách: {p.get('style_label','')}\n"
-                f"📐 Kích thước: {info['val']}\n\n"
-                "Tạo ảnh ngay không?"
-            )
-            await q.edit_message_text(
-                summary,
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Tạo ảnh ngay!", callback_data="gen")],
-                    [InlineKeyboardButton("🔁 Chọn lại từ đầu", callback_data="new")],
-                ]),
-            )
-
-    # ── Photo size ──
-    elif d.startswith("photosize_"):
-        size_val = d[10:]
-        set_param(uid, "size_val", size_val)
-        set_param(uid, "source", "photo")
-        await _do_gen(q, uid)
-
-    # ── Gen ──
-    elif d == "gen":
-        await _do_gen(q, uid)
-
-    # ── Remix ──
-    elif d == "remix":
-        p = get_params(uid)
-        if not p.get("theme"):
-            await q.edit_message_text("Hãy tạo mẫu mới trước nhé!", reply_markup=START_KB)
+    elif d == "confirm_gen":
+        if not AI:
+            await q.edit_message_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
             return
-        await _do_gen(q, uid)
+        await q.edit_message_text("⏳ Đang tạo ảnh, chờ mình 20 giây nhé...")
+        try:
+            prompt = build_prompt(s.get("theme","elegant nail art"), s.get("shape","almond"), s.get("style","minimalist"))
+            url    = await asyncio.to_thread(gen_image, prompt)
+            s["last_prompt"] = prompt
+            s["step"]        = 0
+            await ctx.bot.send_photo(
+                chat_id=q.message.chat_id, photo=url,
+                caption="✨ Đây là ảnh nail của bạn!", reply_markup=RESULT_KB,
+            )
+            await q.message.delete()
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text("❌ Lỗi tạo ảnh, thử lại nhé!")
 
-    # ── Tweak ──
+    elif d == "remix":
+        if not AI:
+            await q.edit_message_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
+            return
+        last = s.get("last_prompt")
+        if not last:
+            await q.edit_message_text("Hãy tạo mẫu mới nhé!", reply_markup=START_KB)
+            return
+        await q.edit_message_text("🔄 Đang tạo biến tấu mới...")
+        try:
+            url = await asyncio.to_thread(gen_image, last + ", creative variation")
+            s["last_prompt"] = last + ", creative variation"
+            await ctx.bot.send_photo(
+                chat_id=q.message.chat_id, photo=url,
+                caption="🔄 Biến tấu mới đây!", reply_markup=RESULT_KB,
+            )
+            await q.message.delete()
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text("❌ Lỗi, thử lại nhé!")
+
     elif d == "tweak":
-        await q.edit_message_text(
-            "🎨 Chọn thay đổi bạn muốn:",
-            reply_markup=TWEAK_KB,
-        )
+        await q.edit_message_text("🎨 Chọn màu hoặc hình dạng móng muốn thay:", reply_markup=TWEAK_KB)
 
     elif d.startswith("tw_"):
-        label = d[3:]
-        if label in COLORS:
-            set_param(uid, "theme", COLORS[label])
-            set_param(uid, "theme_label", label)
-        await _do_gen(q, uid)
-
-    elif d.startswith("tws_"):
-        label = d[4:]
-        if label in SHAPES:
-            set_param(uid, "shape", SHAPES[label])
-            set_param(uid, "shape_label", label)
-        await _do_gen(q, uid)
+        if not AI:
+            await q.edit_message_text(soon_msg(), parse_mode="Markdown", reply_markup=SOON_KB)
+            return
+        tweak_val = d[3:]
+        await q.edit_message_text(f"🎨 Đang tạo với *{tweak_val}*...", parse_mode="Markdown")
+        try:
+            new_prompt = f"Professional nail art photography, macro close-up, {tweak_val}, gel finish, studio lighting, white background, 8k ultra detail"
+            url = await asyncio.to_thread(gen_image, new_prompt)
+            s["last_prompt"] = new_prompt
+            await ctx.bot.send_photo(
+                chat_id=q.message.chat_id, photo=url,
+                caption=f"🎨 Đã đổi sang _{tweak_val}_!",
+                parse_mode="Markdown", reply_markup=RESULT_KB,
+            )
+            await q.message.delete()
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text("❌ Lỗi, thử lại nhé!")
 
     elif d == "back_result":
-        await q.edit_message_text(
-            "Chọn tiếp theo bạn muốn làm gì:",
-            reply_markup=result_kb(),
-        )
+        await q.edit_message_text("Chọn bước tiếp theo:", reply_markup=RESULT_KB)
 
     elif d == "new":
         reset(uid)
         await q.edit_message_text(
-            "💅 Tạo mẫu nail mới!\n\nChọn cách bắt đầu:",
+            "💅 Tạo mẫu nail mới!\n\nBạn muốn tạo theo cách nào?",
             reply_markup=START_KB,
         )
 
-async def _do_gen(q, uid: int):
-    """Gen ảnh DALL-E 3 và gửi cho user"""
-    await q.edit_message_text("⏳ Đang tạo ảnh nail, chờ mình một chút...")
-    p = get_params(uid)
-    try:
-        url = await generate_image(p)
-        # Download ảnh rồi gửi qua Telegram
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.get(url)
-        img_bytes = r.content
-
-        caption = (
-            f"✨ *Ảnh nail của bạn!*\n\n"
-            f"🎨 {p.get('theme_label','')}\n"
-            f"💅 {p.get('shape_label','')} · {p.get('style_label','')}\n"
-            f"📐 {p.get('size_val','1024x1024')}"
-        )
-        await q.message.reply_photo(
-            photo=img_bytes,
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=result_kb(),
-        )
-        await q.delete_message()
-
-    except Exception as e:
-        log.exception(e)
-        await q.edit_message_text(
-            "❌ Lỗi tạo ảnh. Thử lại nhé!",
-            reply_markup=result_kb(),
-        )
-
-# ── main ─────────────────────────────────────────────────────────────────────
+# ── main ──────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    log.info(f"Bot started — polling {RUN_SECONDS}s ...")
-    app.run_polling(
-        drop_pending_updates=True,
-        stop_signals=None,
-        close_loop=False,
-        timeout=RUN_SECONDS,
-    )
+    log.info("🚀 Nail Bot started...")
+    app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
-    import signal, threading
-    def _stop():
-        import time; time.sleep(RUN_SECONDS)
-        os.kill(os.getpid(), signal.SIGINT)
-    threading.Thread(target=_stop, daemon=True).start()
     main()
