@@ -21,9 +21,11 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "")
 HF_HEADERS = {"Authorization": f"Bearer {HF_TOKEN}"}
 
 # model gen ảnh — SDXL miễn phí
-HF_IMAGE_URL   = "https://api-inference.huggingface.co/models/stabilityai/stable-diffusion-2-1"
+HF_IMAGE_URL   = "https://api-inference.huggingface.coHF_IMAGE_URL   = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
+
+models/stabilityai/stable-diffusion-2-1"
 # model phân tích ảnh — BLIP miễn phí
-HF_VISION_URL  = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-large"
+HF_VISION_URL  = "https://api-inference.huggingface.co/models/Salesforce/blip-image-captioning-base"
 
 # ── session ───────────────────────────────────────────────────────────────────
 SESSIONS: dict[int, dict] = {}
@@ -145,16 +147,12 @@ def build_prompt(theme: str, shape: str, style: str) -> str:
 NEG_PROMPT = "blurry, low quality, ugly, deformed, hands, fingers visible, watermark, text"
 
 def gen_image_hf(prompt: str) -> bytes:
-    """Gọi HuggingFace SDXL, trả về bytes ảnh"""
-    import time
-    payload = {
-        "inputs": prompt,
-        "parameters": {
-            "negative_prompt": NEG_PROMPT,
-            "num_inference_steps": 30,
-            "guidance_scale": 7.5,
-            "width": 768,
-            "height": 768,
+    from huggingface_hub import InferenceClient
+    client = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
+    image = client.text_to_image(prompt, model="black-forest-labs/FLUX.1-dev")
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
         }
     }
     # retry tối đa 3 lần (model có thể đang load)
