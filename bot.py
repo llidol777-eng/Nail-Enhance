@@ -22,44 +22,40 @@ HF_TOKEN   = os.environ.get("HF_TOKEN", "")
 GROQ_KEY   = os.environ.get("GROQ_API_KEY", "")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-GROQ_CLIENT = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
-OPENAI      = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+UNSPLASH_KEY = os.environ.get("UNSPLASH_KEY", "")
+GROQ_CLIENT  = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
+OPENAI       = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-# ── image search ──────────────────────────────────────────────────────────────
+# ── image search via Unsplash API ─────────────────────────────────────────────
 def search_nail_images(query: str, count: int = 5) -> list[str]:
-    """Tìm ảnh nail qua Google Images"""
-    search_query = f"{query} nail art"
-    url = f"https://www.google.com/search?q={search_query.replace(' ', '+')}&tbm=isch&num=20"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
-        "Accept-Language": "en-US,en;q=0.9",
+    """Tìm ảnh nail qua Unsplash API"""
+    if not UNSPLASH_KEY:
+        return []
+    url = "https://api.unsplash.com/search/photos"
+    params = {
+        "query": f"{query} nail art",
+        "per_page": count,
+        "orientation": "portrait",
     }
+    headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
     try:
-        r = requests.get(url, headers=headers, timeout=15)
-        # tìm img URLs trong response
-        img_urls = re.findall(r'https://[^"\'<>\s]+\.(?:jpg|jpeg|png)', r.text)
-        # lọc bỏ icon nhỏ và gstatic
-        filtered = [
-            u for u in img_urls
-            if "gstatic" not in u
-            and "google" not in u
-            and len(u) > 40
-        ]
-        seen = set()
-        unique = []
-        for u in filtered:
-            if u not in seen:
-                seen.add(u)
-                unique.append(u)
-        return unique[:count]
+        r = requests.get(url, headers=headers, params=params, timeout=15)
+        if r.status_code != 200:
+            log.warning(f"Unsplash API error: {r.status_code}")
+            return []
+        data = r.json()
+        return [
+            item["urls"]["regular"]
+            for item in data.get("results", [])
+            if item.get("urls", {}).get("regular")
+        ][:count]
     except Exception as e:
-        log.warning(f"Image search failed: {e}")
+        log.warning(f"Unsplash search failed: {e}")
         return []
 
 def download_image_bytes(url: str) -> bytes | None:
     try:
-        headers = {"User-Agent": "Mozilla/5.0"}
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, timeout=15)
         if r.status_code == 200 and len(r.content) > 5000:
             return r.content
         return None
