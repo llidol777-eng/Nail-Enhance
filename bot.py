@@ -451,10 +451,14 @@ async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int, ref
 
 # ── Pinterest search flow ─────────────────────────────────────────────────────
 async def do_pinterest_search(chat_id, theme: str, mdl: str, uid: int, ctx, status_msg=None):
+    # luôn tạo message mới để tránh lỗi "Message is not modified"
+    new_msg = await ctx.bot.send_message(chat_id=chat_id, text=f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
+    if status_msg:
+        try:
+            await status_msg.delete()
+        except Exception:
+            pass
     try:
-        if status_msg:
-            await status_msg.edit_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
-
         img_urls = await asyncio.to_thread(search_nail_images, theme, 5)
 
         img_bytes_list = []
@@ -464,11 +468,8 @@ async def do_pinterest_search(chat_id, theme: str, mdl: str, uid: int, ctx, stat
                 if b:
                     img_bytes_list.append(b)
 
-        if status_msg:
-            found = len(img_bytes_list)
-            await status_msg.edit_text(
-                f"✅ Tìm thấy {found} ảnh tham khảo!\n🤖 Groq đang phân tích..."
-            )
+        found = len(img_bytes_list)
+        await new_msg.edit_text(f"✅ Tìm thấy {found} ảnh!\n🤖 Groq đang phân tích...")
 
         if img_bytes_list:
             prompt = await asyncio.to_thread(groq_analyze_multiple_images, img_bytes_list, theme)
@@ -476,9 +477,7 @@ async def do_pinterest_search(chat_id, theme: str, mdl: str, uid: int, ctx, stat
             prompt = await asyncio.to_thread(groq_write_prompt, theme)
 
         sess(uid)["theme"] = theme
-
-        if status_msg:
-            await status_msg.delete()
+        await new_msg.delete()
 
         await show_prompt_preview(
             chat_id, prompt, mdl, ctx, uid,
@@ -487,8 +486,10 @@ async def do_pinterest_search(chat_id, theme: str, mdl: str, uid: int, ctx, stat
 
     except Exception as e:
         log.exception(e)
-        if status_msg:
-            await status_msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+        try:
+            await new_msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+        except Exception:
+            pass
 
 # ── show steps ────────────────────────────────────────────────────────────────
 async def show_menu(q, uid: int):
@@ -621,9 +622,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif d in PINTEREST_THEMES:
-    theme = PINTEREST_THEMES[d].split(" ", 1)[1]
-    await q.edit_message_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
-    await do_pinterest_search(q.message.chat_id, theme, mdl, uid, ctx, None)
+        theme = PINTEREST_THEMES[d].split(" ", 1)[1]
+        await q.edit_message_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
+        await do_pinterest_search(q.message.chat_id, theme, mdl, uid, ctx, q.message)
 
     # ── prompt actions ────────────────────────────────────────────────────────
     elif d == "prompt_go":
