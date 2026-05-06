@@ -140,7 +140,7 @@ def groq_analyze_image(image_bytes: bytes) -> str:
         return "nail art design, beautiful woman's hand, gel nails, studio lighting"
     b64 = base64.b64encode(image_bytes).decode()
     resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.2-90b-vision-preview",
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
         messages=[{
             "role": "user",
             "content": [
