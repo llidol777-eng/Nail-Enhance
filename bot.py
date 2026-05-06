@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import base64
 from huggingface_hub import InferenceClient
-from google import genai
+import google.generativeai as genai
 from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -16,23 +16,21 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-TOKEN        = os.environ["TELEGRAM_BOT_TOKEN"]
-HF_TOKEN     = os.environ.get("HF_TOKEN", "")
-GEMINI_KEY   = os.environ.get("GEMINI_API_KEY", "")
-OPENAI_KEY   = os.environ.get("OPENAI_API_KEY", "")
+TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
+HF_TOKEN   = os.environ.get("HF_TOKEN", "")
+GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-# ── AI clients ────────────────────────────────────────────────────────────────
 HF_CLIENT = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
 
 if GEMINI_KEY:
     genai.configure(api_key=GEMINI_KEY)
-    GEMINI = genai.GenerativeModel("gemini-1.5-flash")
+    GEMINI = genai.GenerativeModel("gemini-2.0-flash")
 else:
     GEMINI = None
 
 OPENAI = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
-# ── holiday map ───────────────────────────────────────────────────────────────
 HOLIDAYS = {
     "h01": ("❄️ New Year's Day",    "silver glitter, countdown, midnight sparkle, festive"),
     "h02": ("💝 Valentine's Day",   "red pink hearts, roses, romantic love, cute"),
@@ -94,51 +92,46 @@ TWEAK_MAP = {
     "tw_coffin":   "coffin nail shape",
 }
 
-# ── session ───────────────────────────────────────────────────────────────────
 SESSIONS: dict[int, dict] = {}
 
 def sess(uid: int) -> dict:
     if uid not in SESSIONS:
         SESSIONS[uid] = {
             "step": 0, "theme": None, "shape": None, "style": None,
-            "last_prompt": None, "model": "flux",  # default model
+            "last_prompt": None, "model": "flux",
         }
     return SESSIONS[uid]
 
 def reset(uid: int):
-    model = sess(uid).get("model", "flux")  # giữ model đã chọn
+    model = sess(uid).get("model", "flux")
     SESSIONS[uid] = {
         "step": 0, "theme": None, "shape": None, "style": None,
         "last_prompt": None, "model": model,
     }
 
-# ── progress ──────────────────────────────────────────────────────────────────
 def progress(step: int) -> str:
     return "".join(["▓" if i < step else "░" for i in range(5)]) + f" Bước {step}/5\n\n"
 
 def model_label(model: str) -> str:
-    if model == "dalle":
-        return "⭐ DALL-E 3"
-    return "🆓 FLUX.1"
+    return "⭐ DALL-E 3" if model == "dalle" else "🆓 FLUX.1"
 
-# ── keyboards ─────────────────────────────────────────────────────────────────
 def start_kb(model: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",    callback_data="flow_photo")],
-        [InlineKeyboardButton("✍️ Tạo từ lựa chọn",     callback_data="flow_text")],
-        [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}", callback_data="choose_model")],
+        [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",              callback_data="flow_photo")],
+        [InlineKeyboardButton("✍️ Tạo từ lựa chọn",               callback_data="flow_text")],
+        [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}",  callback_data="choose_model")],
     ])
 
 MODEL_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🆓 FLUX.1 — Miễn phí, ~30s",      callback_data="set_flux")],
+    [InlineKeyboardButton("🆓 FLUX.1 — Miễn phí, ~30s",           callback_data="set_flux")],
     [InlineKeyboardButton("⭐ DALL-E 3 — Trả phí, ~10s, đẹp hơn", callback_data="set_dalle")],
-    [InlineKeyboardButton("↩️ Quay lại",                       callback_data="menu_main")],
+    [InlineKeyboardButton("↩️ Quay lại",                           callback_data="menu_main")],
 ])
 
 STEP1_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🎨 Chọn tông màu",         callback_data="tab_color")],
-    [InlineKeyboardButton("🎉 Chọn theo ngày lễ Mỹ",  callback_data="tab_holiday")],
-    [InlineKeyboardButton("🏠 Menu chính",             callback_data="menu_main")],
+    [InlineKeyboardButton("🎨 Chọn tông màu",        callback_data="tab_color")],
+    [InlineKeyboardButton("🎉 Chọn theo ngày lễ Mỹ", callback_data="tab_holiday")],
+    [InlineKeyboardButton("🏠 Menu chính",            callback_data="menu_main")],
 ])
 
 COLOR_KB = InlineKeyboardMarkup([
@@ -191,9 +184,9 @@ def style_kb() -> InlineKeyboardMarkup:
 
 def confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tạo ảnh ngay!",    callback_data="confirm_gen")],
-        [InlineKeyboardButton("↩️ Quay lại",          callback_data="back_step3")],
-        [InlineKeyboardButton("🔁 Chọn lại từ đầu",  callback_data="new")],
+        [InlineKeyboardButton("✅ Tạo ảnh ngay!",   callback_data="confirm_gen")],
+        [InlineKeyboardButton("↩️ Quay lại",         callback_data="back_step3")],
+        [InlineKeyboardButton("🔁 Chọn lại từ đầu", callback_data="new")],
     ])
 
 RESULT_KB = InlineKeyboardMarkup([
@@ -216,7 +209,6 @@ TWEAK_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_result")],
 ])
 
-# ── Gemini helpers ────────────────────────────────────────────────────────────
 def gemini_write_prompt(theme: str, shape: str, style: str) -> str:
     if not GEMINI:
         return (
@@ -257,7 +249,6 @@ def gemini_retouch_prompt(original_prompt: str) -> str:
     )
     return result.text.strip()
 
-# ── image gen ─────────────────────────────────────────────────────────────────
 def gen_flux(prompt: str) -> bytes:
     image = HF_CLIENT.text_to_image(
         prompt + ", perfect fingers, realistic hands, no deformity",
@@ -278,8 +269,7 @@ def gen_dalle(prompt: str) -> bytes:
         n=1,
     )
     url = resp.data[0].url
-    import httpx as hx
-    r = hx.get(url)
+    r = httpx.get(url)
     return r.content
 
 def gen_image(prompt: str, model: str) -> bytes:
@@ -293,7 +283,6 @@ async def get_photo_bytes(photo, ctx) -> bytes:
         r = await c.get(file.file_path)
     return r.content
 
-# ── show steps ────────────────────────────────────────────────────────────────
 async def show_menu(q, uid: int):
     s = sess(uid)
     await q.edit_message_text(
@@ -335,7 +324,6 @@ async def show_step4(q, s):
         reply_markup=confirm_kb(),
     )
 
-# ── handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "bạn"
@@ -354,8 +342,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
     msg = await update.message.reply_text(
-        f"🔍 Gemini đang phân tích ảnh...\n"
-        f"🤖 Sẽ gen bằng {model_label(mdl)}, chờ nhé!"
+        f"🔍 Gemini đang phân tích ảnh...\n🤖 Sẽ gen bằng {model_label(mdl)}, chờ nhé!"
     )
     try:
         img_bytes = await get_photo_bytes(update.message.photo, ctx)
@@ -388,8 +375,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"✨ Gemini đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
     )
     try:
-        prompt  = await asyncio.to_thread(gemini_write_prompt, text, "almond", "elegant")
-        img     = await asyncio.to_thread(gen_image, prompt, mdl)
+        prompt = await asyncio.to_thread(gemini_write_prompt, text, "almond", "elegant")
+        img    = await asyncio.to_thread(gen_image, prompt, mdl)
         s["last_prompt"] = prompt
         await ctx.bot.send_photo(
             chat_id=update.effective_chat.id,
@@ -416,17 +403,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_menu(q, uid)
 
     elif d == "choose_model":
-        await q.edit_message_text(
-            "🤖 Chọn model AI để gen ảnh nail:",
-            reply_markup=MODEL_KB,
-        )
+        await q.edit_message_text("🤖 Chọn model AI để gen ảnh nail:", reply_markup=MODEL_KB)
 
     elif d == "set_flux":
         s["model"] = "flux"
         await q.edit_message_text(
             "✅ Đã chọn *FLUX.1* — miễn phí!\n\nBạn muốn tạo mẫu nail theo cách nào?",
-            parse_mode="Markdown",
-            reply_markup=start_kb("flux"),
+            parse_mode="Markdown", reply_markup=start_kb("flux"),
         )
 
     elif d == "set_dalle":
@@ -436,8 +419,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["model"] = "dalle"
         await q.edit_message_text(
             "✅ Đã chọn *DALL-E 3* — chất lượng cao!\n\nBạn muốn tạo mẫu nail theo cách nào?",
-            parse_mode="Markdown",
-            reply_markup=start_kb("dalle"),
+            parse_mode="Markdown", reply_markup=start_kb("dalle"),
         )
 
     elif d == "flow_photo":
@@ -452,16 +434,10 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_step1(q)
 
     elif d == "tab_color":
-        await q.edit_message_text(
-            progress(1) + "Chọn tông màu bạn thích 🎨",
-            reply_markup=COLOR_KB,
-        )
+        await q.edit_message_text(progress(1) + "Chọn tông màu bạn thích 🎨", reply_markup=COLOR_KB)
 
     elif d == "tab_holiday":
-        await q.edit_message_text(
-            progress(1) + "Chọn ngày lễ Mỹ 🎉",
-            reply_markup=holiday_kb(),
-        )
+        await q.edit_message_text(progress(1) + "Chọn ngày lễ Mỹ 🎉", reply_markup=holiday_kb())
 
     elif d == "back_step1":
         s["theme"] = None
@@ -583,9 +559,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
         )
         try:
-            prompt = await asyncio.to_thread(
-                gemini_write_prompt, tweak_val, "almond", "elegant"
-            )
+            prompt = await asyncio.to_thread(gemini_write_prompt, tweak_val, "almond", "elegant")
             img = await asyncio.to_thread(gen_image, prompt, mdl)
             s["last_prompt"] = prompt
             await ctx.bot.send_photo(
@@ -601,12 +575,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
 
     elif d == "back_result":
-        await q.edit_message_text(
-            "Chọn bước tiếp theo:",
-            reply_markup=RESULT_KB,
-        )
+        await q.edit_message_text("Chọn bước tiếp theo:", reply_markup=RESULT_KB)
 
-# ── main ──────────────────────────────────────────────────────────────────────
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", cmd_start))
