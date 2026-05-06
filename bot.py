@@ -621,9 +621,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         )
 
     elif d in PINTEREST_THEMES:
-        theme = PINTEREST_THEMES[d].split(" ", 1)[1]
-        await q.edit_message_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
-        await do_pinterest_search(q.message.chat_id, theme, mdl, uid, ctx, q.message)
+    theme = PINTEREST_THEMES[d].split(" ", 1)[1]
+    await q.edit_message_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
+    await do_pinterest_search(q.message.chat_id, theme, mdl, uid, ctx, None)
 
     # ── prompt actions ────────────────────────────────────────────────────────
     elif d == "prompt_go":
