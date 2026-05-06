@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import base64
 from huggingface_hub import InferenceClient
-import google.generativeai as genai
+from google import genai
 from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
