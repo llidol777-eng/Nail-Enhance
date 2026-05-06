@@ -15,8 +15,26 @@ log = logging.getLogger(__name__)
 
 TOKEN    = os.environ["TELEGRAM_BOT_TOKEN"]
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
-
 HF_CLIENT = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
+
+# ── holiday map — key ngắn để dùng trong callback_data ───────────────────────
+HOLIDAYS = {
+    "h01": ("❄️ New Year's Day",    "silver glitter, countdown, midnight sparkle, festive"),
+    "h02": ("💝 Valentine's Day",   "red pink hearts, roses, romantic love, cute"),
+    "h03": ("🐣 Easter",            "pastel egg colors, bunny, spring flowers, soft"),
+    "h04": ("🌸 St. Patrick's Day", "lucky clover, shamrock green, gold, Irish"),
+    "h05": ("💐 Mother's Day",      "soft floral bouquet, pink white, elegant, feminine"),
+    "h06": ("🎖️ Memorial Day",      "patriotic red white blue, stars stripes, American"),
+    "h07": ("🎓 Graduation",        "gold cap diploma, black gold, achievement, luxury"),
+    "h08": ("🏳️‍🌈 Pride Month",      "rainbow gradient, colorful bold, celebration, vibrant"),
+    "h09": ("🎆 4th of July",       "red white blue fireworks, patriotic sparkle, American"),
+    "h10": ("🎒 Back to School",    "apple pencil books, plaid tartan, fresh start, preppy"),
+    "h11": ("🎃 Halloween",         "pumpkin ghost spider web, black orange purple, spooky"),
+    "h12": ("🦃 Thanksgiving",      "harvest gold brown, fall foliage, warm autumn tones"),
+    "h13": ("🛍️ Black Friday",      "bold black gold accent, glamorous dark luxe, chic"),
+    "h14": ("🎄 Christmas",         "red green festive, snowflake, candy cane, sparkle"),
+    "h15": ("🥂 New Year's Eve",    "champagne gold silver glitter, glam party, luxe"),
+}
 
 # ── session ───────────────────────────────────────────────────────────────────
 SESSIONS: dict[int, dict] = {}
@@ -46,65 +64,89 @@ STEP1_KB = InlineKeyboardMarkup([
 ])
 
 COLOR_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🌸 Pastel",   callback_data="theme_Pastel nhẹ nhàng"),
-     InlineKeyboardButton("🤍 Nude",     callback_data="theme_Nude tự nhiên"),
-     InlineKeyboardButton("💅 Đậm",      callback_data="theme_Màu đậm bold")],
-    [InlineKeyboardButton("✨ Glitter",  callback_data="theme_Glitter lấp lánh"),
-     InlineKeyboardButton("🎨 Ombre",    callback_data="theme_Ombre gradient"),
-     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="theme_Đỏ rượu burgundy")],
-    [InlineKeyboardButton("⬛ Đen",      callback_data="theme_Đen tuyền"),
-     InlineKeyboardButton("🌈 Mix màu",  callback_data="theme_Nhiều màu rực rỡ")],
+    [InlineKeyboardButton("🌸 Pastel",   callback_data="c_pastel"),
+     InlineKeyboardButton("🤍 Nude",     callback_data="c_nude"),
+     InlineKeyboardButton("💅 Đậm",      callback_data="c_bold")],
+    [InlineKeyboardButton("✨ Glitter",  callback_data="c_glitter"),
+     InlineKeyboardButton("🎨 Ombre",    callback_data="c_ombre"),
+     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="c_burgundy")],
+    [InlineKeyboardButton("⬛ Đen",      callback_data="c_black"),
+     InlineKeyboardButton("🌈 Mix màu",  callback_data="c_mix")],
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_step1")],
 ])
 
-HOLIDAY_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("❄️ New Year's Day",    callback_data="theme_New Year's Day - silver glitter, countdown, midnight sparkle"),
-     InlineKeyboardButton("💝 Valentine's Day",   callback_data="theme_Valentine's Day - red pink hearts, roses, romantic love")],
-    [InlineKeyboardButton("🐣 Easter",            callback_data="theme_Easter - pastel egg colors, bunny, spring flowers"),
-     InlineKeyboardButton("🌸 St. Patrick's Day", callback_data="theme_St. Patrick's Day - lucky clover, shamrock green, gold")],
-    [InlineKeyboardButton("💐 Mother's Day",      callback_data="theme_Mother's Day - soft floral bouquet, pink white, elegant"),
-     InlineKeyboardButton("🎖️ Memorial Day",      callback_data="theme_Memorial Day - patriotic red white blue, stars stripes")],
-    [InlineKeyboardButton("🎓 Graduation",        callback_data="theme_Graduation - gold cap diploma, black gold, achievement"),
-     InlineKeyboardButton("🏳️‍🌈 Pride Month",      callback_data="theme_Pride Month - rainbow gradient, colorful bold, celebration")],
-    [InlineKeyboardButton("🎆 4th of July",       callback_data="theme_4th of July - red white blue fireworks, patriotic sparkle"),
-     InlineKeyboardButton("🎒 Back to School",    callback_data="theme_Back to School - apple pencil books, plaid, fresh start")],
-    [InlineKeyboardButton("🎃 Halloween",         callback_data="theme_Halloween - pumpkin ghost spider web, black orange purple"),
-     InlineKeyboardButton("🦃 Thanksgiving",      callback_data="theme_Thanksgiving - harvest gold brown, fall foliage, warm tones")],
-    [InlineKeyboardButton("🛍️ Black Friday",      callback_data="theme_Black Friday - bold black gold accent, glamorous dark luxe"),
-     InlineKeyboardButton("🎄 Christmas",         callback_data="theme_Christmas - red green festive, snowflake, candy cane, sparkle")],
-    [InlineKeyboardButton("🥂 New Year's Eve",    callback_data="theme_New Year's Eve - champagne gold silver glitter, glam party")],
-    [InlineKeyboardButton("↩️ Quay lại",          callback_data="back_step1")],
-])
+COLOR_MAP = {
+    "c_pastel":   "pastel soft pink",
+    "c_nude":     "nude natural beige",
+    "c_bold":     "bold dark color",
+    "c_glitter":  "glitter sparkle",
+    "c_ombre":    "ombre gradient",
+    "c_burgundy": "burgundy red wine",
+    "c_black":    "black glossy",
+    "c_mix":      "colorful mix",
+}
+
+def holiday_kb() -> InlineKeyboardMarkup:
+    rows = []
+    keys = list(HOLIDAYS.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i:i+2]:
+            label, _ = HOLIDAYS[k]
+            row.append(InlineKeyboardButton(label, callback_data=f"hol_{k}"))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="back_step1")])
+    return InlineKeyboardMarkup(rows)
 
 def shape_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌙 Almond",   callback_data="shape_almond"),
-         InlineKeyboardButton("⬛ Square",   callback_data="shape_square"),
-         InlineKeyboardButton("💎 Coffin",   callback_data="shape_coffin")],
-        [InlineKeyboardButton("🥚 Oval",     callback_data="shape_oval"),
-         InlineKeyboardButton("📌 Stiletto", callback_data="shape_stiletto"),
-         InlineKeyboardButton("◻️ Round",    callback_data="shape_round")],
+        [InlineKeyboardButton("🌙 Almond",   callback_data="s_almond"),
+         InlineKeyboardButton("⬛ Square",   callback_data="s_square"),
+         InlineKeyboardButton("💎 Coffin",   callback_data="s_coffin")],
+        [InlineKeyboardButton("🥚 Oval",     callback_data="s_oval"),
+         InlineKeyboardButton("📌 Stiletto", callback_data="s_stiletto"),
+         InlineKeyboardButton("◻️ Round",    callback_data="s_round")],
         [InlineKeyboardButton("↩️ Quay lại", callback_data="back_step1")],
     ])
 
+SHAPE_MAP = {
+    "s_almond":   "almond",
+    "s_square":   "square",
+    "s_coffin":   "coffin",
+    "s_oval":     "oval",
+    "s_stiletto": "stiletto",
+    "s_round":    "round",
+}
+
 def style_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🕊 Minimalist",  callback_data="style_minimalist elegant"),
-         InlineKeyboardButton("🌸 Floral",      callback_data="style_floral botanical"),
-         InlineKeyboardButton("💠 Abstract",    callback_data="style_abstract modern art")],
-        [InlineKeyboardButton("🌟 3D Đắp nổi", callback_data="style_3D sculpted embossed"),
-         InlineKeyboardButton("🤍 French",      callback_data="style_French manicure classic"),
-         InlineKeyboardButton("🌀 Marble",      callback_data="style_marble stone swirl")],
-        [InlineKeyboardButton("🧸 Kawaii",      callback_data="style_kawaii cute pastel"),
-         InlineKeyboardButton("🖤 Dark/Gothic", callback_data="style_dark gothic edgy")],
+        [InlineKeyboardButton("🕊 Minimalist",  callback_data="st_minimal"),
+         InlineKeyboardButton("🌸 Floral",      callback_data="st_floral"),
+         InlineKeyboardButton("💠 Abstract",    callback_data="st_abstract")],
+        [InlineKeyboardButton("🌟 3D Đắp nổi", callback_data="st_3d"),
+         InlineKeyboardButton("🤍 French",      callback_data="st_french"),
+         InlineKeyboardButton("🌀 Marble",      callback_data="st_marble")],
+        [InlineKeyboardButton("🧸 Kawaii",      callback_data="st_kawaii"),
+         InlineKeyboardButton("🖤 Dark/Gothic", callback_data="st_dark")],
         [InlineKeyboardButton("↩️ Quay lại",    callback_data="back_step2")],
     ])
 
+STYLE_MAP = {
+    "st_minimal":  "minimalist elegant",
+    "st_floral":   "floral botanical",
+    "st_abstract": "abstract modern art",
+    "st_3d":       "3D sculpted embossed",
+    "st_french":   "French manicure classic",
+    "st_marble":   "marble stone swirl",
+    "st_kawaii":   "kawaii cute pastel",
+    "st_dark":     "dark gothic edgy",
+}
+
 def confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Tạo ảnh ngay!",    callback_data="confirm_gen")],
-        [InlineKeyboardButton("↩️ Quay lại",          callback_data="back_step3")],
-        [InlineKeyboardButton("🔁 Chọn lại từ đầu",  callback_data="new")],
+        [InlineKeyboardButton("✅ Tạo ảnh ngay!",   callback_data="confirm_gen")],
+        [InlineKeyboardButton("↩️ Quay lại",         callback_data="back_step3")],
+        [InlineKeyboardButton("🔁 Chọn lại từ đầu", callback_data="new")],
     ])
 
 RESULT_KB = InlineKeyboardMarkup([
@@ -114,25 +156,37 @@ RESULT_KB = InlineKeyboardMarkup([
 ])
 
 TWEAK_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🌸 Pastel",   callback_data="tw_Pastel nhẹ nhàng"),
-     InlineKeyboardButton("🤍 Nude",     callback_data="tw_Nude tự nhiên"),
-     InlineKeyboardButton("💅 Đậm",      callback_data="tw_Màu đậm bold")],
-    [InlineKeyboardButton("✨ Glitter",  callback_data="tw_Glitter lấp lánh"),
-     InlineKeyboardButton("🎨 Ombre",    callback_data="tw_Ombre gradient"),
-     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="tw_Đỏ rượu burgundy")],
-    [InlineKeyboardButton("🌙 Almond",   callback_data="tw_almond shape"),
-     InlineKeyboardButton("⬛ Square",   callback_data="tw_square shape"),
-     InlineKeyboardButton("💎 Coffin",   callback_data="tw_coffin shape")],
+    [InlineKeyboardButton("🌸 Pastel",   callback_data="tw_pastel"),
+     InlineKeyboardButton("🤍 Nude",     callback_data="tw_nude"),
+     InlineKeyboardButton("💅 Đậm",      callback_data="tw_bold")],
+    [InlineKeyboardButton("✨ Glitter",  callback_data="tw_glitter"),
+     InlineKeyboardButton("🎨 Ombre",    callback_data="tw_ombre"),
+     InlineKeyboardButton("❤️ Đỏ rượu", callback_data="tw_burgundy")],
+    [InlineKeyboardButton("🌙 Almond",   callback_data="tw_almond"),
+     InlineKeyboardButton("⬛ Square",   callback_data="tw_square"),
+     InlineKeyboardButton("💎 Coffin",   callback_data="tw_coffin")],
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_result")],
 ])
+
+TWEAK_MAP = {
+    "tw_pastel":   "pastel soft pink",
+    "tw_nude":     "nude natural beige",
+    "tw_bold":     "bold dark color",
+    "tw_glitter":  "glitter sparkle",
+    "tw_ombre":    "ombre gradient",
+    "tw_burgundy": "burgundy red wine",
+    "tw_almond":   "almond nail shape",
+    "tw_square":   "square nail shape",
+    "tw_coffin":   "coffin nail shape",
+}
 
 # ── image gen ─────────────────────────────────────────────────────────────────
 def build_prompt(theme: str, shape: str, style: str) -> str:
     return (
-        f"professional nail art photo, macro close-up, "
-        f"{theme}, {shape} nail shape, {style} nail design, "
-        f"gel nails, studio lighting, white background, "
-        f"high quality, 4k, sharp focus, elegant"
+        f"beautiful woman's hand with {style} nail art, "
+        f"{theme} color, {shape} shaped nails, "
+        f"gel nails, elegant hand pose, soft studio lighting, "
+        f"white background, high quality, 4k, sharp focus"
     )
 
 def gen_image(prompt: str) -> bytes:
@@ -150,8 +204,9 @@ def analyze_and_gen(image_bytes: bytes) -> tuple[str, bytes]:
         model="Salesforce/blip-image-captioning-base",
     )
     prompt = (
-        f"professional nail art photo, macro close-up, {caption}, "
-        f"gel nails, studio lighting, white background, high quality, 4k, sharp focus"
+        f"beautiful woman's hand with nail art, {caption}, "
+        f"gel nails, elegant hand pose, soft studio lighting, "
+        f"white background, high quality, 4k, sharp focus"
     )
     return prompt, gen_image(prompt)
 
@@ -175,7 +230,7 @@ async def show_step1(q):
     )
 
 async def show_step2(q, s):
-    theme_short = s["theme"].split(" -")[0] if s["theme"] else ""
+    theme_short = s["theme"].split(",")[0] if s["theme"] else ""
     await q.edit_message_text(
         progress(2) + f"Đã chọn: *{theme_short}* ✅\n\nHình dạng móng?",
         parse_mode="Markdown",
@@ -190,13 +245,12 @@ async def show_step3(q, s):
     )
 
 async def show_step4(q, s):
-    theme_short = s["theme"].split(" -")[0] if s["theme"] else ""
     await q.edit_message_text(
         progress(5) +
         f"📋 *Tóm tắt lựa chọn:*\n\n"
-        f"🎨 Chủ đề: *{theme_short}*\n"
-        f"💅 Hình móng: *{s['shape']}*\n"
-        f"✨ Phong cách: *{s['style']}*\n\n"
+        f"🎨 Chủ đề: *{s.get('theme','').split(',')[0]}*\n"
+        f"💅 Hình móng: *{s.get('shape','')}*\n"
+        f"✨ Phong cách: *{s.get('style','')}*\n\n"
         "Tạo ảnh nail ngay không?",
         parse_mode="Markdown",
         reply_markup=confirm_kb(),
@@ -287,7 +341,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif d == "tab_holiday":
         await q.edit_message_text(
             progress(1) + "Chọn ngày lễ Mỹ 🎉",
-            reply_markup=HOLIDAY_KB,
+            reply_markup=holiday_kb(),
         )
 
     elif d == "back_step1":
@@ -295,18 +349,26 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["step"]  = 1
         await show_step1(q)
 
-    elif d.startswith("theme_"):
-        s["theme"] = d[6:]
+    elif d in COLOR_MAP:
+        s["theme"] = COLOR_MAP[d]
         s["step"]  = 2
         await show_step2(q, s)
+
+    elif d.startswith("hol_"):
+        key = d[4:]
+        if key in HOLIDAYS:
+            label, desc = HOLIDAYS[key]
+            s["theme"] = f"{label}, {desc}"
+            s["step"]  = 2
+            await show_step2(q, s)
 
     elif d == "back_step2":
         s["shape"] = None
         s["step"]  = 1
         await show_step1(q)
 
-    elif d.startswith("shape_"):
-        s["shape"] = d[6:]
+    elif d in SHAPE_MAP:
+        s["shape"] = SHAPE_MAP[d]
         s["step"]  = 3
         await show_step3(q, s)
 
@@ -315,8 +377,8 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["step"]  = 2
         await show_step2(q, s)
 
-    elif d.startswith("style_"):
-        s["style"] = d[6:]
+    elif d in STYLE_MAP:
+        s["style"] = STYLE_MAP[d]
         s["step"]  = 4
         await show_step4(q, s)
 
@@ -369,16 +431,17 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             reply_markup=TWEAK_KB,
         )
 
-    elif d.startswith("tw_"):
-        tweak_val = d[3:]
+    elif d in TWEAK_MAP:
+        tweak_val = TWEAK_MAP[d]
         await q.edit_message_text(
             f"🎨 Đang tạo với *{tweak_val}*, chờ ~30 giây...",
             parse_mode="Markdown",
         )
         try:
             new_prompt = (
-                f"professional nail art photo, macro close-up, {tweak_val}, "
-                f"gel nails, studio lighting, white background, high quality, 4k, sharp focus"
+                f"beautiful woman's hand with nail art, {tweak_val}, "
+                f"gel nails, elegant hand pose, soft studio lighting, "
+                f"white background, high quality, 4k, sharp focus"
             )
             img = await asyncio.to_thread(gen_image, new_prompt)
             s["last_prompt"] = new_prompt
