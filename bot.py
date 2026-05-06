@@ -159,7 +159,7 @@ def groq_retouch_prompt(original_prompt: str) -> str:
 # ── image gen ─────────────────────────────────────────────────────────────────
 def gen_flux(prompt: str) -> bytes:
     import time
-    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
+    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
     headers = {"Authorization": f"Bearer {HF_TOKEN}"}
     payload = {"inputs": prompt + ", perfect fingers, realistic hands, no deformity"}
     for attempt in range(3):
