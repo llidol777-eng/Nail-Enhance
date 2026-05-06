@@ -288,15 +288,10 @@ def groq_retouch_prompt(original_prompt: str) -> str:
 
 # ── image gen ─────────────────────────────────────────────────────────────────
 def gen_flux(prompt: str) -> bytes:
-    import httpx as _hx
-    hf = InferenceClient(
-        provider="hf-inference",
-        api_key=HF_TOKEN,
-        timeout=120,
-    )
-    image = hf.text_to_image(
+    image = HF_CLIENT.text_to_image(
         prompt + ", perfect fingers, realistic hands, no deformity",
         model="black-forest-labs/FLUX.1-schnell",
+        timeout=120,
     )
     buf = io.BytesIO()
     image.save(buf, format="PNG")
