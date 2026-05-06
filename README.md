@@ -1,67 +1,63 @@
 # 💅 Nail Telegram Bot
 
-Bot Telegram tạo ảnh nail bằng AI — chạy miễn phí trên GitHub Actions.
-
-**GPT-4o Vision** phân tích ảnh + **DALL-E 3** tạo ảnh thật.
+Bot Telegram tạo ảnh nail bằng **GPT-4o Vision + DALL-E 3**.  
+Chạy miễn phí trên **GitHub Actions** — không cần server.
 
 ---
 
 ## Tính năng
 
-| | |
+| | Tính năng |
 |---|---|
-| 📸 Gửi ảnh | GPT-4o đọc ảnh → tạo mẫu tương tự |
-| ✍️ Mô tả 6 bước | Tông màu/Ngày lễ → Dịp → Hình móng → Phong cách → Kích thước → Gen |
-| 🔄 Biến tấu | Gen lại ảnh mới cùng phong cách |
-| 🎨 Đổi màu/hình | Thay đổi và gen lại ngay |
-| 📐 3 kích thước | 1024×1024 / 1792×1024 / 1024×1792 |
+| 📸 | Gửi ảnh nail → GPT-4o phân tích → DALL-E 3 tạo ảnh tương tự |
+| ✍️ | Chọn 5 bước: Tông màu / Ngày lễ Mỹ → Hình móng → Phong cách → Gen ảnh |
+| 🎉 | 14 ngày lễ Mỹ: Valentine's, Easter, Halloween, Christmas... |
+| 🔄 | Nút Biến tấu khác — gen lại ảnh mới |
+| 🎨 | Nút Đổi màu / hình móng — chọn và gen lại |
 
 ---
 
 ## Setup (5 phút)
 
-### 1. Fork repo
-Nhấn **Fork** góc trên phải.
+### Bước 1 — Fork repo
+Nhấn **Fork** góc trên phải trang GitHub này.
 
-### 2. Tạo Telegram Bot
-Nhắn `@BotFather` → `/newbot` → lấy token.
+### Bước 2 — Tạo Telegram Bot
+1. Nhắn `@BotFather` trên Telegram
+2. Gõ `/newbot` → đặt tên → copy **token** (`123456:ABC-xxx`)
 
-### 3. Lấy OpenAI API Key
-Vào [platform.openai.com](https://platform.openai.com) → API Keys → Create.  
-Nạp tối thiểu **$5** vào Billing. Mỗi ảnh tốn ~$0.04–0.06.
+### Bước 3 — Lấy OpenAI API Key
+1. Vào [platform.openai.com](https://platform.openai.com)
+2. **API Keys** → **Create new secret key** → copy (`sk-proj-...`)
+3. **Billing** → nạp tối thiểu $10  
+   Chi phí mỗi lần dùng ~$0.08 (GPT-4o phân tích + DALL-E 3 gen ảnh)
 
-### 4. Thêm Secrets vào GitHub
-**Settings → Secrets and variables → Actions → New repository secret**
+### Bước 4 — Thêm Secrets vào GitHub
+Repo → **Settings** → **Secrets and variables** → **Actions** → **New repository secret**:
 
-| Secret | Giá trị |
-|--------|---------|
+| Tên secret | Giá trị |
+|---|---|
 | `TELEGRAM_BOT_TOKEN` | Token từ BotFather |
 | `OPENAI_API_KEY` | Key từ OpenAI |
 
-### 5. Bật Actions
-Tab **Actions** → **Enable workflows** → **Run workflow** để test ngay.
+### Bước 5 — Bật GitHub Actions
+1. Tab **Actions** → **Enable workflows**
+2. Nhấn **Run workflow** → **Run** để test ngay
 
-### 6. Test
-Nhắn `/start` cho bot — bot trả lời trong vòng 5 phút!
+### Bước 6 — Test
+Nhắn `/start` cho bot trên Telegram!
 
----
-
-## Chi phí ước tính
-
-| Dịch vụ | Giá/lần |
-|---------|---------|
-| GPT-4o Vision (phân tích ảnh) | ~$0.01 |
-| DALL-E 3 (tạo ảnh 1024×1024) | ~$0.04 |
-| DALL-E 3 (tạo ảnh 1792×1024 hoặc 1024×1792) | ~$0.08 |
-
-$5 dùng được khoảng **50–100 lần** tạo ảnh.
+> ⚠️ Bot chạy mỗi 5 phút nên có thể trả lời chậm tối đa 5 phút.
 
 ---
 
 ## Tuỳ chỉnh
 
-**Đổi tên bot:** Tìm `Nail Bot` trong `bot.py` → thay tên tiệm.
+**Đổi tên bot:** Tìm `Nail Bot` trong `bot.py` → sửa thành tên tiệm bạn.
 
-**Thêm ngày lễ:** Tìm dict `HOLIDAYS` trong `bot.py` → thêm dòng mới.
+**Thêm ngày lễ:** Tìm `HOLIDAY_KB` trong `bot.py` → thêm dòng mới theo format:
+```python
+InlineKeyboardButton("🎆 Tên lễ", callback_data="theme_Tên lễ - mô tả tiếng Anh"),
+```
 
-**Thêm phong cách:** Tìm dict `STYLES` → thêm tùy chọn.
+**Đổi chất lượng ảnh:** Tìm `quality="standard"` → đổi thành `quality="hd"` (đẹp hơn, tốn ~$0.12/ảnh).
