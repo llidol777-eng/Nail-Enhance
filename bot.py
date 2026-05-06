@@ -5,7 +5,7 @@ import asyncio
 import httpx
 import base64
 from huggingface_hub import InferenceClient
-import google.generativeai as genai
+from groq import Groq
 from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -18,18 +18,12 @@ log = logging.getLogger(__name__)
 
 TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
 HF_TOKEN   = os.environ.get("HF_TOKEN", "")
-GEMINI_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_KEY   = os.environ.get("GROQ_API_KEY", "")
 OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
 
-HF_CLIENT = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
-
-if GEMINI_KEY:
-    genai.configure(api_key=GEMINI_KEY)
-    GEMINI = genai.GenerativeModel("gemini-2.0-flash")
-else:
-    GEMINI = None
-
-OPENAI = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+HF_CLIENT   = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
+GROQ_CLIENT = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
+OPENAI      = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 HOLIDAYS = {
     "h01": ("❄️ New Year's Day",    "silver glitter, countdown, midnight sparkle, festive"),
@@ -115,11 +109,118 @@ def progress(step: int) -> str:
 def model_label(model: str) -> str:
     return "⭐ DALL-E 3" if model == "dalle" else "🆓 FLUX.1"
 
+# ── Groq helpers ──────────────────────────────────────────────────────────────
+def groq_write_prompt(theme: str, shape: str, style: str) -> str:
+    if not GROQ_CLIENT:
+        return (
+            f"beautiful woman's hand with {style} nail art, "
+            f"{theme} color, {shape} shaped nails, gel nails, "
+            f"elegant hand pose, soft studio lighting, white background, "
+            f"high quality, 4k, sharp focus"
+        )
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Write a detailed image generation prompt for nail art. "
+                f"Theme: {theme}, nail shape: {shape}, style: {style}. "
+                f"Include: beautiful woman's hand, gel nails, elegant pose, "
+                f"studio lighting, white background, high quality. "
+                f"Return ONLY the prompt, max 60 words, in English."
+            )
+        }],
+        max_tokens=120,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+def groq_analyze_image(image_bytes: bytes) -> str:
+    if not GROQ_CLIENT:
+        return "nail art design, beautiful woman's hand, gel nails, studio lighting"
+    b64 = base64.b64encode(image_bytes).decode()
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.2-90b-vision-preview",
+        messages=[{
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Analyze this nail art image. Write a detailed image generation prompt "
+                        "to recreate similar nail art on a beautiful woman's hand. "
+                        "Include colors, patterns, nail shape, style, gel finish, "
+                        "elegant hand pose, studio lighting, white background. "
+                        "Return ONLY the prompt, max 60 words, in English."
+                    )
+                }
+            ]
+        }],
+        max_tokens=120,
+    )
+    return resp.choices[0].message.content.strip()
+
+def groq_retouch_prompt(original_prompt: str) -> str:
+    if not GROQ_CLIENT:
+        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Improve this nail art image prompt to fix common AI issues "
+                f"(deformed fingers, unrealistic nails). Make it look perfect and realistic. "
+                f"Original: {original_prompt}. "
+                f"Return ONLY the improved prompt, max 70 words, in English."
+            )
+        }],
+        max_tokens=130,
+        temperature=0.5,
+    )
+    return resp.choices[0].message.content.strip()
+
+# ── image gen ─────────────────────────────────────────────────────────────────
+def gen_flux(prompt: str) -> bytes:
+    image = HF_CLIENT.text_to_image(
+        prompt + ", perfect fingers, realistic hands, no deformity",
+        model="black-forest-labs/FLUX.1-schnell",
+    )
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+def gen_dalle(prompt: str) -> bytes:
+    if not OPENAI:
+        raise Exception("Chưa có OpenAI API key!")
+    resp = OPENAI.images.generate(
+        model="dall-e-3",
+        prompt=prompt + ", perfect fingers, realistic hands, professional photography",
+        size="1024x1024",
+        quality="standard",
+        n=1,
+    )
+    r = httpx.get(resp.data[0].url)
+    return r.content
+
+def gen_image(prompt: str, model: str) -> bytes:
+    return gen_dalle(prompt) if model == "dalle" else gen_flux(prompt)
+
+async def get_photo_bytes(photo, ctx) -> bytes:
+    file = await ctx.bot.get_file(photo[-1].file_id)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(file.file_path)
+    return r.content
+
+# ── keyboards ─────────────────────────────────────────────────────────────────
 def start_kb(model: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",              callback_data="flow_photo")],
-        [InlineKeyboardButton("✍️ Tạo từ lựa chọn",               callback_data="flow_text")],
-        [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}",  callback_data="choose_model")],
+        [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",             callback_data="flow_photo")],
+        [InlineKeyboardButton("✍️ Tạo từ lựa chọn",              callback_data="flow_text")],
+        [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}", callback_data="choose_model")],
     ])
 
 MODEL_KB = InlineKeyboardMarkup([
@@ -209,80 +310,7 @@ TWEAK_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_result")],
 ])
 
-def gemini_write_prompt(theme: str, shape: str, style: str) -> str:
-    if not GEMINI:
-        return (
-            f"beautiful woman's hand with {style} nail art, "
-            f"{theme} color, {shape} shaped nails, "
-            f"gel nails, elegant hand pose, soft studio lighting, "
-            f"white background, high quality, 4k, sharp focus"
-        )
-    result = GEMINI.generate_content(
-        f"Write a detailed image generation prompt for nail art. "
-        f"Theme: {theme}, nail shape: {shape}, style: {style}. "
-        f"Include: beautiful woman's hand, gel nails, elegant pose, studio lighting, white background. "
-        f"Return ONLY the prompt, max 60 words, in English."
-    )
-    return result.text.strip()
-
-def gemini_analyze_image(image_bytes: bytes) -> str:
-    if not GEMINI:
-        return "nail art design"
-    img_part = {"mime_type": "image/jpeg", "data": base64.b64encode(image_bytes).decode()}
-    result = GEMINI.generate_content([
-        img_part,
-        "Analyze this nail art image. Write a detailed image generation prompt to recreate "
-        "similar nail art on a beautiful woman's hand. Include colors, patterns, nail shape, "
-        "style, gel finish, elegant hand pose, studio lighting, white background. "
-        "Return ONLY the prompt, max 60 words, in English."
-    ])
-    return result.text.strip()
-
-def gemini_retouch_prompt(original_prompt: str) -> str:
-    if not GEMINI:
-        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
-    result = GEMINI.generate_content(
-        f"Improve this nail art image prompt to fix common AI generation issues "
-        f"(deformed fingers, unrealistic nails). Make nails look perfect and realistic. "
-        f"Original: {original_prompt}. "
-        f"Return ONLY the improved prompt, max 70 words, in English."
-    )
-    return result.text.strip()
-
-def gen_flux(prompt: str) -> bytes:
-    image = HF_CLIENT.text_to_image(
-        prompt + ", perfect fingers, realistic hands, no deformity",
-        model="black-forest-labs/FLUX.1-schnell",
-    )
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
-
-def gen_dalle(prompt: str) -> bytes:
-    if not OPENAI:
-        raise Exception("Chưa có OpenAI API key!")
-    resp = OPENAI.images.generate(
-        model="dall-e-3",
-        prompt=prompt + ", perfect fingers, realistic hands, professional photography",
-        size="1024x1024",
-        quality="standard",
-        n=1,
-    )
-    url = resp.data[0].url
-    r = httpx.get(url)
-    return r.content
-
-def gen_image(prompt: str, model: str) -> bytes:
-    if model == "dalle":
-        return gen_dalle(prompt)
-    return gen_flux(prompt)
-
-async def get_photo_bytes(photo, ctx) -> bytes:
-    file = await ctx.bot.get_file(photo[-1].file_id)
-    async with httpx.AsyncClient() as c:
-        r = await c.get(file.file_path)
-    return r.content
-
+# ── show steps ────────────────────────────────────────────────────────────────
 async def show_menu(q, uid: int):
     s = sess(uid)
     await q.edit_message_text(
@@ -324,17 +352,17 @@ async def show_step4(q, s):
         reply_markup=confirm_kb(),
     )
 
+# ── handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     name = update.effective_user.first_name or "bạn"
     reset(uid)
-    s = sess(uid)
     await update.message.reply_text(
         f"Xin chào *{name}*! 💅\n\n"
         "Chào mừng bạn đến với *Nail Bot*!\n"
         "Bạn muốn tạo mẫu nail theo cách nào?",
         parse_mode="Markdown",
-        reply_markup=start_kb(s["model"]),
+        reply_markup=start_kb(sess(uid)["model"]),
     )
 
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -342,11 +370,11 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
     msg = await update.message.reply_text(
-        f"🔍 Gemini đang phân tích ảnh...\n🤖 Sẽ gen bằng {model_label(mdl)}, chờ nhé!"
+        f"🔍 Groq đang phân tích ảnh...\n🤖 Sẽ gen bằng {model_label(mdl)}, chờ nhé!"
     )
     try:
         img_bytes = await get_photo_bytes(update.message.photo, ctx)
-        prompt    = await asyncio.to_thread(gemini_analyze_image, img_bytes)
+        prompt    = await asyncio.to_thread(groq_analyze_image, img_bytes)
         await msg.edit_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}...")
         img_out   = await asyncio.to_thread(gen_image, prompt, mdl)
         s["last_prompt"] = prompt
@@ -372,10 +400,10 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
     msg = await update.message.reply_text(
-        f"✨ Gemini đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
+        f"✨ Groq đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
     )
     try:
-        prompt = await asyncio.to_thread(gemini_write_prompt, text, "almond", "elegant")
+        prompt = await asyncio.to_thread(groq_write_prompt, text, "almond", "elegant")
         img    = await asyncio.to_thread(gen_image, prompt, mdl)
         s["last_prompt"] = prompt
         await ctx.bot.send_photo(
@@ -425,7 +453,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif d == "flow_photo":
         await q.edit_message_text(
             "📸 Gửi ảnh nail bạn thích vào đây!\n"
-            f"_Gemini sẽ phân tích → {model_label(mdl)} gen ảnh_ 🎨",
+            f"_Groq sẽ phân tích → {model_label(mdl)} gen ảnh_ 🎨",
             parse_mode="Markdown",
         )
 
@@ -479,11 +507,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d == "confirm_gen":
         await q.edit_message_text(
-            f"⏳ Gemini đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
+            f"⏳ Groq đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
         )
         try:
             prompt = await asyncio.to_thread(
-                gemini_write_prompt,
+                groq_write_prompt,
                 s.get("theme", "elegant nail art"),
                 s.get("shape", "almond"),
                 s.get("style", "minimalist"),
@@ -529,10 +557,10 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await show_menu(q, uid)
             return
         await q.edit_message_text(
-            f"✨ Gemini đang retouch prompt...\n🤖 Gen lại bằng {model_label(mdl)}, chờ nhé!"
+            f"✨ Groq đang retouch prompt...\n🤖 Gen lại bằng {model_label(mdl)}, chờ nhé!"
         )
         try:
-            retouched = await asyncio.to_thread(gemini_retouch_prompt, last)
+            retouched = await asyncio.to_thread(groq_retouch_prompt, last)
             img = await asyncio.to_thread(gen_image, retouched, mdl)
             s["last_prompt"] = retouched
             await ctx.bot.send_photo(
@@ -555,11 +583,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif d in TWEAK_MAP:
         tweak_val = TWEAK_MAP[d]
         await q.edit_message_text(
-            f"🎨 Gemini đang viết prompt cho *{tweak_val}*...",
+            f"🎨 Groq đang viết prompt cho *{tweak_val}*...",
             parse_mode="Markdown",
         )
         try:
-            prompt = await asyncio.to_thread(gemini_write_prompt, tweak_val, "almond", "elegant")
+            prompt = await asyncio.to_thread(groq_write_prompt, tweak_val, "almond", "elegant")
             img = await asyncio.to_thread(gen_image, prompt, mdl)
             s["last_prompt"] = prompt
             await ctx.bot.send_photo(
@@ -583,7 +611,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    log.info("🚀 Nail Bot (Gemini + FLUX + DALL-E 3) started...")
+    log.info("🚀 Nail Bot (Groq + FLUX + DALL-E 3) started...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
