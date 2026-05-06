@@ -93,6 +93,8 @@ def sess(uid: int) -> dict:
         SESSIONS[uid] = {
             "step": 0, "theme": None, "shape": None, "style": None,
             "last_prompt": None, "model": "flux",
+            "pending_prompt": None,  # prompt chờ confirm/edit
+            "editing_prompt": False, # đang chờ user nhập prompt mới
         }
     return SESSIONS[uid]
 
@@ -101,6 +103,8 @@ def reset(uid: int):
     SESSIONS[uid] = {
         "step": 0, "theme": None, "shape": None, "style": None,
         "last_prompt": None, "model": model,
+        "pending_prompt": None,
+        "editing_prompt": False,
     }
 
 def progress(step: int) -> str:
@@ -109,112 +113,14 @@ def progress(step: int) -> str:
 def model_label(model: str) -> str:
     return "⭐ DALL-E 3" if model == "dalle" else "🆓 FLUX.1"
 
-# ── Groq helpers ──────────────────────────────────────────────────────────────
-def groq_write_prompt(theme: str, shape: str, style: str) -> str:
-    if not GROQ_CLIENT:
-        return (
-            f"beautiful woman's hand with {style} nail art, "
-            f"{theme} color, {shape} shaped nails, gel nails, "
-            f"elegant hand pose, soft studio lighting, white background, "
-            f"high quality, 4k, sharp focus"
-        )
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Write a detailed image generation prompt for nail art. "
-                f"Theme: {theme}, nail shape: {shape}, style: {style}. "
-                f"Include: beautiful woman's hand, gel nails, elegant pose, "
-                f"studio lighting, white background, high quality. "
-                f"Return ONLY the prompt, max 60 words, in English."
-            )
-        }],
-        max_tokens=120,
-        temperature=0.7,
-    )
-    return resp.choices[0].message.content.strip()
-
-def groq_analyze_image(image_bytes: bytes) -> str:
-    if not GROQ_CLIENT:
-        return "nail art design, beautiful woman's hand, gel nails, studio lighting"
-    b64 = base64.b64encode(image_bytes).decode()
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[{
-            "role": "user",
-            "content": [
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{b64}"}
-                },
-                {
-                    "type": "text",
-                    "text": (
-                        "Analyze this nail art image. Write a detailed image generation prompt "
-                        "to recreate similar nail art on a beautiful woman's hand. "
-                        "Include colors, patterns, nail shape, style, gel finish, "
-                        "elegant hand pose, studio lighting, white background. "
-                        "Return ONLY the prompt, max 60 words, in English."
-                    )
-                }
-            ]
-        }],
-        max_tokens=120,
-    )
-    return resp.choices[0].message.content.strip()
-
-def groq_retouch_prompt(original_prompt: str) -> str:
-    if not GROQ_CLIENT:
-        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Improve this nail art image prompt to fix common AI issues "
-                f"(deformed fingers, unrealistic nails). Make it look perfect and realistic. "
-                f"Original: {original_prompt}. "
-                f"Return ONLY the improved prompt, max 70 words, in English."
-            )
-        }],
-        max_tokens=130,
-        temperature=0.5,
-    )
-    return resp.choices[0].message.content.strip()
-
-# ── image gen ─────────────────────────────────────────────────────────────────
-def gen_flux(prompt: str) -> bytes:
-    image = HF_CLIENT.text_to_image(
-        prompt + ", perfect fingers, realistic hands, no deformity",
-        model="black-forest-labs/FLUX.1-schnell",
-        timeout=120,
-    )
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
-
-def gen_dalle(prompt: str) -> bytes:
-    if not OPENAI:
-        raise Exception("Chưa có OpenAI API key!")
-    resp = OPENAI.images.generate(
-        model="dall-e-3",
-        prompt=prompt + ", perfect fingers, realistic hands, professional photography",
-        size="1024x1024",
-        quality="standard",
-        n=1,
-    )
-    r = httpx.get(resp.data[0].url)
-    return r.content
-
-def gen_image(prompt: str, model: str) -> bytes:
-    return gen_dalle(prompt) if model == "dalle" else gen_flux(prompt)
-
-async def get_photo_bytes(photo, ctx) -> bytes:
-    file = await ctx.bot.get_file(photo[-1].file_id)
-    async with httpx.AsyncClient() as c:
-        r = await c.get(file.file_path)
-    return r.content
+# ── prompt confirm keyboard ───────────────────────────────────────────────────
+def prompt_confirm_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Gen ảnh ngay!",       callback_data="prompt_go")],
+        [InlineKeyboardButton("✏️ Chỉnh sửa prompt",   callback_data="prompt_edit")],
+        [InlineKeyboardButton("🔄 Viết lại prompt",     callback_data="prompt_regen")],
+        [InlineKeyboardButton("🏠 Huỷ",                 callback_data="new")],
+    ])
 
 # ── keyboards ─────────────────────────────────────────────────────────────────
 def start_kb(model: str) -> InlineKeyboardMarkup:
@@ -311,6 +217,125 @@ TWEAK_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("↩️ Quay lại", callback_data="back_result")],
 ])
 
+# ── Groq helpers ──────────────────────────────────────────────────────────────
+def groq_write_prompt(theme: str, shape: str, style: str) -> str:
+    if not GROQ_CLIENT:
+        return (
+            f"beautiful woman's hand with {style} nail art, "
+            f"{theme} color, {shape} shaped nails, gel nails, "
+            f"elegant hand pose, soft studio lighting, white background, "
+            f"high quality, 4k, sharp focus"
+        )
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Write a detailed image generation prompt for nail art photography. "
+                f"Theme/color: {theme}, nail shape: {shape}, style: {style}. "
+                f"Must include: beautiful woman's hand, gel nails, elegant pose, "
+                f"studio lighting, white background, photorealistic, high quality. "
+                f"Return ONLY the prompt, max 70 words, in English. No quotes, no explanation."
+            )
+        }],
+        max_tokens=150,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+def groq_analyze_image(image_bytes: bytes) -> str:
+    if not GROQ_CLIENT:
+        return "nail art design, beautiful woman's hand, gel nails, studio lighting"
+    b64 = base64.b64encode(image_bytes).decode()
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                {"type": "text", "text": (
+                    "Analyze this nail art image carefully. Write a detailed image generation prompt "
+                    "to recreate similar nail art. Include: exact colors, nail shape, decorative elements, "
+                    "finish type (matte/glossy), style, beautiful woman's hand, elegant pose, "
+                    "studio lighting, white background, photorealistic. "
+                    "Return ONLY the prompt, max 70 words, in English. No quotes."
+                )}
+            ]
+        }],
+        max_tokens=150,
+    )
+    return resp.choices[0].message.content.strip()
+
+def groq_retouch_prompt(original_prompt: str) -> str:
+    if not GROQ_CLIENT:
+        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Improve this nail art image generation prompt. "
+                f"Fix issues: deformed fingers, unrealistic nails, bad anatomy. "
+                f"Add: perfect realistic fingers, flawless nail art, professional photography. "
+                f"Original prompt: {original_prompt}. "
+                f"Return ONLY the improved prompt, max 80 words, in English. No quotes."
+            )
+        }],
+        max_tokens=150,
+        temperature=0.5,
+    )
+    return resp.choices[0].message.content.strip()
+
+# ── image gen ─────────────────────────────────────────────────────────────────
+def gen_flux(prompt: str) -> bytes:
+    image = HF_CLIENT.text_to_image(
+        prompt + ", perfect fingers, realistic hands, no deformity",
+        model="black-forest-labs/FLUX.1-schnell",
+        timeout=120,
+    )
+    buf = io.BytesIO()
+    image.save(buf, format="PNG")
+    return buf.getvalue()
+
+def gen_dalle(prompt: str) -> bytes:
+    if not OPENAI:
+        raise Exception("Chưa có OpenAI API key!")
+    resp = OPENAI.images.generate(
+        model="dall-e-3",
+        prompt=prompt + ", perfect fingers, realistic hands, professional nail photography",
+        size="1024x1024",
+        quality="standard",
+        n=1,
+    )
+    r = httpx.get(resp.data[0].url)
+    return r.content
+
+def gen_image(prompt: str, model: str) -> bytes:
+    return gen_dalle(prompt) if model == "dalle" else gen_flux(prompt)
+
+async def get_photo_bytes(photo, ctx) -> bytes:
+    file = await ctx.bot.get_file(photo[-1].file_id)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(file.file_path)
+    return r.content
+
+# ── show prompt preview ───────────────────────────────────────────────────────
+async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int):
+    """Hiển thị prompt để user confirm/edit trước khi gen ảnh"""
+    sess(uid)["pending_prompt"] = prompt
+    sess(uid)["editing_prompt"] = False
+    await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"📝 *Prompt Groq đã viết:*\n\n"
+            f"`{prompt}`\n\n"
+            f"🤖 Sẽ gen bằng: *{model_label(mdl)}*\n\n"
+            f"Bạn muốn làm gì?"
+        ),
+        parse_mode="Markdown",
+        reply_markup=prompt_confirm_kb(),
+    )
+
 # ── show steps ────────────────────────────────────────────────────────────────
 async def show_menu(q, uid: int):
     s = sess(uid)
@@ -353,6 +378,29 @@ async def show_step4(q, s):
         reply_markup=confirm_kb(),
     )
 
+# ── do gen after prompt confirmed ─────────────────────────────────────────────
+async def do_gen(chat_id, prompt: str, mdl: str, uid: int, ctx, caption_extra: str = ""):
+    msg = await ctx.bot.send_message(
+        chat_id=chat_id,
+        text=f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ ~30 giây..."
+    )
+    try:
+        img = await asyncio.to_thread(gen_image, prompt, mdl)
+        sess(uid)["last_prompt"] = prompt
+        sess(uid)["pending_prompt"] = None
+        caption = f"✨ {caption_extra}\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
+        await ctx.bot.send_photo(
+            chat_id=chat_id,
+            photo=io.BytesIO(img),
+            caption=caption,
+            parse_mode="Markdown",
+            reply_markup=RESULT_KB,
+        )
+        await msg.delete()
+    except Exception as e:
+        log.exception(e)
+        await msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
 # ── handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
@@ -371,21 +419,13 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
     msg = await update.message.reply_text(
-        f"🔍 Groq đang phân tích ảnh...\n🤖 Sẽ gen bằng {model_label(mdl)}, chờ nhé!"
+        "🔍 Groq đang phân tích ảnh và viết prompt..."
     )
     try:
         img_bytes = await get_photo_bytes(update.message.photo, ctx)
         prompt    = await asyncio.to_thread(groq_analyze_image, img_bytes)
-        await msg.edit_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}...")
-        img_out   = await asyncio.to_thread(gen_image, prompt, mdl)
-        s["last_prompt"] = prompt
-        await ctx.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=io.BytesIO(img_out),
-            caption=f"✨ Mẫu nail tương tự ảnh bạn gửi!\n🤖 {model_label(mdl)}",
-            reply_markup=RESULT_KB,
-        )
         await msg.delete()
+        await show_prompt_preview(update.effective_chat.id, prompt, mdl, ctx, uid)
     except Exception as e:
         log.exception(e)
         await msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
@@ -395,26 +435,30 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.startswith("/"):
         return
-    if sess(uid)["step"] > 0:
+    s = sess(uid)
+
+    # đang ở chế độ edit prompt
+    if s.get("editing_prompt"):
+        s["pending_prompt"] = text
+        s["editing_prompt"] = False
+        mdl = s.get("model", "flux")
+        await update.message.reply_text(
+            f"📝 *Prompt mới của bạn:*\n\n`{text}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nXác nhận?",
+            parse_mode="Markdown",
+            reply_markup=prompt_confirm_kb(),
+        )
+        return
+
+    if s["step"] > 0:
         await update.message.reply_text("Bạn hãy chọn một trong các nút bên trên nhé 👆")
         return
-    s   = sess(uid)
+
     mdl = s.get("model", "flux")
-    msg = await update.message.reply_text(
-        f"✨ Groq đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
-    )
+    msg = await update.message.reply_text("✨ Groq đang viết prompt từ mô tả của bạn...")
     try:
         prompt = await asyncio.to_thread(groq_write_prompt, text, "almond", "elegant")
-        img    = await asyncio.to_thread(gen_image, prompt, mdl)
-        s["last_prompt"] = prompt
-        await ctx.bot.send_photo(
-            chat_id=update.effective_chat.id,
-            photo=io.BytesIO(img),
-            caption=f"✨ Nail theo yêu cầu: _{text}_\n🤖 {model_label(mdl)}",
-            parse_mode="Markdown",
-            reply_markup=RESULT_KB,
-        )
         await msg.delete()
+        await show_prompt_preview(update.effective_chat.id, prompt, mdl, ctx, uid)
     except Exception as e:
         log.exception(e)
         await msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
@@ -427,7 +471,57 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
 
-    if d in ("menu_main", "new"):
+    # ── prompt actions ────────────────────────────────────────────────────────
+    if d == "prompt_go":
+        prompt = s.get("pending_prompt")
+        if not prompt:
+            await show_menu(q, uid)
+            return
+        await q.edit_message_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ ~30 giây...")
+        try:
+            img = await asyncio.to_thread(gen_image, prompt, mdl)
+            s["last_prompt"] = prompt
+            s["pending_prompt"] = None
+            caption = f"✨ Đây là ảnh nail của bạn!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
+            await ctx.bot.send_photo(
+                chat_id=q.message.chat_id,
+                photo=io.BytesIO(img),
+                caption=caption,
+                parse_mode="Markdown",
+                reply_markup=RESULT_KB,
+            )
+            await q.message.delete()
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
+    elif d == "prompt_edit":
+        s["editing_prompt"] = True
+        await q.edit_message_text(
+            f"✏️ *Chỉnh sửa prompt:*\n\nPrompt hiện tại:\n`{s.get('pending_prompt','')}`\n\n"
+            f"Nhắn prompt mới vào đây (tiếng Anh để kết quả tốt nhất):",
+            parse_mode="Markdown",
+        )
+
+    elif d == "prompt_regen":
+        s_theme = s.get("theme", "elegant nail art")
+        s_shape = s.get("shape", "almond")
+        s_style = s.get("style", "minimalist")
+        await q.edit_message_text("🔄 Groq đang viết lại prompt mới...")
+        try:
+            new_prompt = await asyncio.to_thread(groq_write_prompt, s_theme, s_shape, s_style)
+            s["pending_prompt"] = new_prompt
+            await q.edit_message_text(
+                f"📝 *Prompt mới:*\n\n`{new_prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
+                parse_mode="Markdown",
+                reply_markup=prompt_confirm_kb(),
+            )
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
+    # ── menu ──────────────────────────────────────────────────────────────────
+    elif d in ("menu_main", "new"):
         reset(uid)
         await show_menu(q, uid)
 
@@ -454,7 +548,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif d == "flow_photo":
         await q.edit_message_text(
             "📸 Gửi ảnh nail bạn thích vào đây!\n"
-            f"_Groq sẽ phân tích → {model_label(mdl)} gen ảnh_ 🎨",
+            f"_Groq sẽ phân tích → hiện prompt → {model_label(mdl)} gen ảnh_ 🎨",
             parse_mode="Markdown",
         )
 
@@ -507,9 +601,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_step4(q, s)
 
     elif d == "confirm_gen":
-        await q.edit_message_text(
-            f"⏳ Groq đang viết prompt...\n🤖 Gen bằng {model_label(mdl)}, chờ nhé!"
-        )
+        await q.edit_message_text("⏳ Groq đang viết prompt...")
         try:
             prompt = await asyncio.to_thread(
                 groq_write_prompt,
@@ -517,16 +609,13 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 s.get("shape", "almond"),
                 s.get("style", "minimalist"),
             )
-            img = await asyncio.to_thread(gen_image, prompt, mdl)
-            s["last_prompt"] = prompt
-            s["step"]        = 0
-            await ctx.bot.send_photo(
-                chat_id=q.message.chat_id,
-                photo=io.BytesIO(img),
-                caption=f"✨ Đây là ảnh nail của bạn!\n🤖 {model_label(mdl)}",
-                reply_markup=RESULT_KB,
+            s["step"] = 0
+            await q.edit_message_text(
+                f"📝 *Prompt Groq đã viết:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
+                parse_mode="Markdown",
+                reply_markup=prompt_confirm_kb(),
             )
-            await q.message.delete()
+            s["pending_prompt"] = prompt
         except Exception as e:
             log.exception(e)
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
@@ -536,15 +625,17 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not last:
             await show_menu(q, uid)
             return
-        await q.edit_message_text(f"🔄 Đang tạo biến tấu, gen bằng {model_label(mdl)}...")
+        await q.edit_message_text(f"🔄 Đang tạo biến tấu bằng {model_label(mdl)}...")
         try:
-            new_prompt = last + ", creative variation, different composition"
+            new_prompt = last + ", creative variation, different composition, unique style"
             img = await asyncio.to_thread(gen_image, new_prompt, mdl)
             s["last_prompt"] = new_prompt
+            caption = f"🔄 Biến tấu mới!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{new_prompt[:200]}`"
             await ctx.bot.send_photo(
                 chat_id=q.message.chat_id,
                 photo=io.BytesIO(img),
-                caption=f"🔄 Biến tấu mới!\n🤖 {model_label(mdl)}",
+                caption=caption,
+                parse_mode="Markdown",
                 reply_markup=RESULT_KB,
             )
             await q.message.delete()
@@ -557,20 +648,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not last:
             await show_menu(q, uid)
             return
-        await q.edit_message_text(
-            f"✨ Groq đang retouch prompt...\n🤖 Gen lại bằng {model_label(mdl)}, chờ nhé!"
-        )
+        await q.edit_message_text("✨ Groq đang retouch prompt...")
         try:
             retouched = await asyncio.to_thread(groq_retouch_prompt, last)
-            img = await asyncio.to_thread(gen_image, retouched, mdl)
-            s["last_prompt"] = retouched
-            await ctx.bot.send_photo(
-                chat_id=q.message.chat_id,
-                photo=io.BytesIO(img),
-                caption=f"✨ Ảnh nail đã được retouch!\n🤖 {model_label(mdl)}",
-                reply_markup=RESULT_KB,
+            s["pending_prompt"] = retouched
+            await q.edit_message_text(
+                f"📝 *Prompt sau retouch:*\n\n`{retouched}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
+                parse_mode="Markdown",
+                reply_markup=prompt_confirm_kb(),
             )
-            await q.message.delete()
         except Exception as e:
             log.exception(e)
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
@@ -583,22 +669,15 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d in TWEAK_MAP:
         tweak_val = TWEAK_MAP[d]
-        await q.edit_message_text(
-            f"🎨 Groq đang viết prompt cho *{tweak_val}*...",
-            parse_mode="Markdown",
-        )
+        await q.edit_message_text(f"🎨 Groq đang viết prompt cho *{tweak_val}*...", parse_mode="Markdown")
         try:
             prompt = await asyncio.to_thread(groq_write_prompt, tweak_val, "almond", "elegant")
-            img = await asyncio.to_thread(gen_image, prompt, mdl)
-            s["last_prompt"] = prompt
-            await ctx.bot.send_photo(
-                chat_id=q.message.chat_id,
-                photo=io.BytesIO(img),
-                caption=f"🎨 Đã đổi sang _{tweak_val}_!\n🤖 {model_label(mdl)}",
+            s["pending_prompt"] = prompt
+            await q.edit_message_text(
+                f"📝 *Prompt cho {tweak_val}:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
                 parse_mode="Markdown",
-                reply_markup=RESULT_KB,
+                reply_markup=prompt_confirm_kb(),
             )
-            await q.message.delete()
         except Exception as e:
             log.exception(e)
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
