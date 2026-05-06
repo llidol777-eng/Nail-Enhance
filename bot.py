@@ -4,6 +4,8 @@ import logging
 import asyncio
 import httpx
 import base64
+import json
+import re
 from huggingface_hub import InferenceClient
 from groq import Groq
 from openai import OpenAI
@@ -25,6 +27,132 @@ HF_CLIENT   = InferenceClient(provider="hf-inference", api_key=HF_TOKEN)
 GROQ_CLIENT = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
 OPENAI      = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
+# ── Pinterest scraper ─────────────────────────────────────────────────────────
+PINTEREST_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/javascript, */*; q=0.01",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Referer": "https://www.pinterest.com/",
+}
+
+def search_pinterest_images(query: str, count: int = 5) -> list[str]:
+    """Scrape Pinterest search results, return list of image URLs"""
+    search_query = f"{query} nail art"
+    url = f"https://www.pinterest.com/search/pins/?q={search_query.replace(' ', '%20')}&rs=typed"
+    try:
+        r = httpx.get(url, headers=PINTEREST_HEADERS, timeout=15, follow_redirects=True)
+        # tìm image URLs từ HTML
+        img_urls = re.findall(r'https://i\.pinimg\.com/[^"\'\\s]+\.jpg', r.text)
+        # lọc ảnh 564x (medium size) hoặc 736x (large)
+        filtered = [u for u in img_urls if "/564x/" in u or "/736x/" in u]
+        # dedup
+        seen = set()
+        unique = []
+        for u in filtered:
+            if u not in seen:
+                seen.add(u)
+                unique.append(u)
+        return unique[:count]
+    except Exception as e:
+        log.warning(f"Pinterest scrape failed: {e}")
+        return []
+
+def download_image(url: str) -> bytes | None:
+    try:
+        r = httpx.get(url, headers=PINTEREST_HEADERS, timeout=10)
+        if r.status_code == 200:
+            return r.content
+        return None
+    except Exception:
+        return None
+
+def groq_analyze_pinterest_images(image_bytes_list: list[bytes], theme: str) -> str:
+    """Dùng Groq Vision phân tích nhiều ảnh Pinterest → tổng hợp prompt"""
+    if not GROQ_CLIENT or not image_bytes_list:
+        return f"beautiful woman's hand with {theme} nail art, gel nails, elegant pose, studio lighting, white background, high quality, 4k"
+
+    # phân tích từng ảnh
+    analyses = []
+    for i, img_bytes in enumerate(image_bytes_list[:3]):  # max 3 ảnh
+        try:
+            b64 = base64.b64encode(img_bytes).decode()
+            resp = GROQ_CLIENT.chat.completions.create(
+                model="meta-llama/llama-4-scout-17b-16e-instruct",
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+                        {"type": "text", "text": (
+                            "Analyze this nail art image briefly. Describe: "
+                            "1) Colors and color combinations "
+                            "2) Nail shape "
+                            "3) Decorative elements/patterns "
+                            "4) Finish type (matte/glossy/chrome) "
+                            "Keep it under 40 words."
+                        )}
+                    ]
+                }],
+                max_tokens=80,
+            )
+            analyses.append(resp.choices[0].message.content.strip())
+        except Exception as e:
+            log.warning(f"Image {i} analysis failed: {e}")
+            continue
+
+    if not analyses:
+        return f"beautiful woman's hand with {theme} nail art, gel nails, elegant studio lighting"
+
+    # tổng hợp tất cả phân tích → viết 1 prompt đẹp
+    combined = "\n".join([f"- {a}" for a in analyses])
+    resp = GROQ_CLIENT.chat.completions.create(
+        model="llama-3.3-70b-versatile",
+        messages=[{
+            "role": "user",
+            "content": (
+                f"Based on these Pinterest nail art analyses for theme '{theme}':\n{combined}\n\n"
+                f"Write ONE detailed image generation prompt combining the best elements. "
+                f"Must include: beautiful woman's hand, gel nails, elegant pose, "
+                f"studio lighting, white background, photorealistic, high quality, 4k. "
+                f"Max 70 words, English only, no quotes, no explanation."
+            )
+        }],
+        max_tokens=150,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+# ── Pinterest theme map ───────────────────────────────────────────────────────
+PINTEREST_THEMES = {
+    "pt_cherry":    "🌸 Cherry Blossom",
+    "pt_marble":    "🌀 Marble",
+    "pt_french":    "🤍 French Tip",
+    "pt_glitter":   "✨ Glitter",
+    "pt_ombre":     "🎨 Ombre",
+    "pt_floral":    "🌺 Floral",
+    "pt_minimal":   "🕊 Minimalist",
+    "pt_chrome":    "💿 Chrome",
+    "pt_3d":        "🌟 3D Nail",
+    "pt_halloween": "🎃 Halloween",
+    "pt_xmas":      "🎄 Christmas",
+    "pt_valentine": "💝 Valentine",
+    "pt_summer":    "☀️ Summer",
+    "pt_pastel":    "🌷 Pastel",
+    "pt_korean":    "🇰🇷 Korean Style",
+    "pt_vintage":   "🕰 Vintage",
+}
+
+def pinterest_theme_kb() -> InlineKeyboardMarkup:
+    rows = []
+    keys = list(PINTEREST_THEMES.keys())
+    for i in range(0, len(keys), 2):
+        row = []
+        for k in keys[i:i+2]:
+            row.append(InlineKeyboardButton(PINTEREST_THEMES[k], callback_data=k))
+        rows.append(row)
+    rows.append([InlineKeyboardButton("↩️ Quay lại", callback_data="menu_main")])
+    return InlineKeyboardMarkup(rows)
+
+# ── holidays ──────────────────────────────────────────────────────────────────
 HOLIDAYS = {
     "h01": ("❄️ New Year's Day",    "silver glitter, countdown, midnight sparkle, festive"),
     "h02": ("💝 Valentine's Day",   "red pink hearts, roses, romantic love, cute"),
@@ -86,6 +214,7 @@ TWEAK_MAP = {
     "tw_coffin":   "coffin nail shape",
 }
 
+# ── session ───────────────────────────────────────────────────────────────────
 SESSIONS: dict[int, dict] = {}
 
 def sess(uid: int) -> dict:
@@ -93,8 +222,7 @@ def sess(uid: int) -> dict:
         SESSIONS[uid] = {
             "step": 0, "theme": None, "shape": None, "style": None,
             "last_prompt": None, "model": "flux",
-            "pending_prompt": None,  # prompt chờ confirm/edit
-            "editing_prompt": False, # đang chờ user nhập prompt mới
+            "pending_prompt": None, "editing_prompt": False,
         }
     return SESSIONS[uid]
 
@@ -103,8 +231,7 @@ def reset(uid: int):
     SESSIONS[uid] = {
         "step": 0, "theme": None, "shape": None, "style": None,
         "last_prompt": None, "model": model,
-        "pending_prompt": None,
-        "editing_prompt": False,
+        "pending_prompt": None, "editing_prompt": False,
     }
 
 def progress(step: int) -> str:
@@ -116,15 +243,16 @@ def model_label(model: str) -> str:
 # ── prompt confirm keyboard ───────────────────────────────────────────────────
 def prompt_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("✅ Gen ảnh ngay!",       callback_data="prompt_go")],
-        [InlineKeyboardButton("✏️ Chỉnh sửa prompt",   callback_data="prompt_edit")],
-        [InlineKeyboardButton("🔄 Viết lại prompt",     callback_data="prompt_regen")],
-        [InlineKeyboardButton("🏠 Huỷ",                 callback_data="new")],
+        [InlineKeyboardButton("✅ Gen ảnh ngay!",     callback_data="prompt_go")],
+        [InlineKeyboardButton("✏️ Chỉnh sửa prompt", callback_data="prompt_edit")],
+        [InlineKeyboardButton("🔄 Viết lại prompt",   callback_data="prompt_regen")],
+        [InlineKeyboardButton("🏠 Huỷ",               callback_data="new")],
     ])
 
-# ── keyboards ─────────────────────────────────────────────────────────────────
+# ── main keyboards ────────────────────────────────────────────────────────────
 def start_kb(model: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📌 Tìm mẫu từ Pinterest",         callback_data="flow_pinterest")],
         [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",             callback_data="flow_photo")],
         [InlineKeyboardButton("✍️ Tạo từ lựa chọn",              callback_data="flow_text")],
         [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}", callback_data="choose_model")],
@@ -223,23 +351,18 @@ def groq_write_prompt(theme: str, shape: str, style: str) -> str:
         return (
             f"beautiful woman's hand with {style} nail art, "
             f"{theme} color, {shape} shaped nails, gel nails, "
-            f"elegant hand pose, soft studio lighting, white background, "
-            f"high quality, 4k, sharp focus"
+            f"elegant hand pose, soft studio lighting, white background, high quality, 4k"
         )
     resp = GROQ_CLIENT.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Write a detailed image generation prompt for nail art photography. "
-                f"Theme/color: {theme}, nail shape: {shape}, style: {style}. "
-                f"Must include: beautiful woman's hand, gel nails, elegant pose, "
-                f"studio lighting, white background, photorealistic, high quality. "
-                f"Return ONLY the prompt, max 70 words, in English. No quotes, no explanation."
-            )
-        }],
-        max_tokens=150,
-        temperature=0.7,
+        messages=[{"role": "user", "content": (
+            f"Write a detailed image generation prompt for nail art photography. "
+            f"Theme/color: {theme}, nail shape: {shape}, style: {style}. "
+            f"Must include: beautiful woman's hand, gel nails, elegant pose, "
+            f"studio lighting, white background, photorealistic, high quality. "
+            f"Return ONLY the prompt, max 70 words, English. No quotes."
+        )}],
+        max_tokens=150, temperature=0.7,
     )
     return resp.choices[0].message.content.strip()
 
@@ -249,19 +372,16 @@ def groq_analyze_image(image_bytes: bytes) -> str:
     b64 = base64.b64encode(image_bytes).decode()
     resp = GROQ_CLIENT.chat.completions.create(
         model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                {"type": "text", "text": (
-                    "Analyze this nail art image carefully. Write a detailed image generation prompt "
-                    "to recreate similar nail art. Include: exact colors, nail shape, decorative elements, "
-                    "finish type (matte/glossy), style, beautiful woman's hand, elegant pose, "
-                    "studio lighting, white background, photorealistic. "
-                    "Return ONLY the prompt, max 70 words, in English. No quotes."
-                )}
-            ]
-        }],
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "text", "text": (
+                "Analyze this nail art image. Write a detailed image generation prompt "
+                "to recreate similar nail art on a beautiful woman's hand. "
+                "Include colors, patterns, nail shape, style, finish, elegant pose, "
+                "studio lighting, white background, photorealistic. "
+                "Return ONLY the prompt, max 70 words, English. No quotes."
+            )}
+        ]}],
         max_tokens=150,
     )
     return resp.choices[0].message.content.strip()
@@ -271,31 +391,29 @@ def groq_retouch_prompt(original_prompt: str) -> str:
         return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
     resp = GROQ_CLIENT.chat.completions.create(
         model="llama-3.3-70b-versatile",
-        messages=[{
-            "role": "user",
-            "content": (
-                f"Improve this nail art image generation prompt. "
-                f"Fix issues: deformed fingers, unrealistic nails, bad anatomy. "
-                f"Add: perfect realistic fingers, flawless nail art, professional photography. "
-                f"Original prompt: {original_prompt}. "
-                f"Return ONLY the improved prompt, max 80 words, in English. No quotes."
-            )
-        }],
-        max_tokens=150,
-        temperature=0.5,
+        messages=[{"role": "user", "content": (
+            f"Improve this nail art prompt to fix AI issues (deformed fingers, unrealistic nails). "
+            f"Add: perfect realistic fingers, flawless nail art, professional photography. "
+            f"Original: {original_prompt}. "
+            f"Return ONLY improved prompt, max 80 words, English. No quotes."
+        )}],
+        max_tokens=150, temperature=0.5,
     )
     return resp.choices[0].message.content.strip()
 
 # ── image gen ─────────────────────────────────────────────────────────────────
 def gen_flux(prompt: str) -> bytes:
-    image = HF_CLIENT.text_to_image(
-        prompt + ", perfect fingers, realistic hands, no deformity",
-        model="black-forest-labs/FLUX.1-schnell",
-        timeout=120,
-    )
-    buf = io.BytesIO()
-    image.save(buf, format="PNG")
-    return buf.getvalue()
+    import requests, time
+    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {"inputs": prompt + ", perfect fingers, realistic hands, no deformity"}
+    for attempt in range(3):
+        r = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+        if r.status_code == 200:
+            return r.content
+        log.warning(f"FLUX attempt {attempt+1}: {r.status_code}")
+        time.sleep(15)
+    raise Exception(f"FLUX error after 3 attempts: {r.status_code}")
 
 def gen_dalle(prompt: str) -> bytes:
     if not OPENAI:
@@ -303,9 +421,7 @@ def gen_dalle(prompt: str) -> bytes:
     resp = OPENAI.images.generate(
         model="dall-e-3",
         prompt=prompt + ", perfect fingers, realistic hands, professional nail photography",
-        size="1024x1024",
-        quality="standard",
-        n=1,
+        size="1024x1024", quality="standard", n=1,
     )
     r = httpx.get(resp.data[0].url)
     return r.content
@@ -320,16 +436,31 @@ async def get_photo_bytes(photo, ctx) -> bytes:
     return r.content
 
 # ── show prompt preview ───────────────────────────────────────────────────────
-async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int):
-    """Hiển thị prompt để user confirm/edit trước khi gen ảnh"""
+async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int, pinterest_imgs: list = None):
     sess(uid)["pending_prompt"] = prompt
     sess(uid)["editing_prompt"] = False
+
+    # gửi ảnh Pinterest tham khảo trước (nếu có)
+    if pinterest_imgs:
+        media_sent = 0
+        for img_url in pinterest_imgs[:3]:
+            try:
+                await ctx.bot.send_photo(
+                    chat_id=chat_id,
+                    photo=img_url,
+                    caption=f"📌 Ảnh tham khảo từ Pinterest" if media_sent == 0 else None,
+                )
+                media_sent += 1
+                await asyncio.sleep(0.3)
+            except Exception:
+                continue
+
     await ctx.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"📝 *Prompt Groq đã viết:*\n\n"
+            f"📝 *Prompt Groq tổng hợp từ Pinterest:*\n\n"
             f"`{prompt}`\n\n"
-            f"🤖 Sẽ gen bằng: *{model_label(mdl)}*\n\n"
+            f"🤖 Gen bằng: *{model_label(mdl)}*\n\n"
             f"Bạn muốn làm gì?"
         ),
         parse_mode="Markdown",
@@ -345,61 +476,32 @@ async def show_menu(q, uid: int):
     )
 
 async def show_step1(q):
-    await q.edit_message_text(
-        progress(1) + "Bạn muốn chọn theo:",
-        reply_markup=STEP1_KB,
-    )
+    await q.edit_message_text(progress(1) + "Bạn muốn chọn theo:", reply_markup=STEP1_KB)
 
 async def show_step2(q, s):
     theme_short = s["theme"].split(",")[0] if s["theme"] else ""
     await q.edit_message_text(
         progress(2) + f"Đã chọn: *{theme_short}* ✅\n\nHình dạng móng?",
-        parse_mode="Markdown",
-        reply_markup=shape_kb(),
+        parse_mode="Markdown", reply_markup=shape_kb(),
     )
 
 async def show_step3(q, s):
     await q.edit_message_text(
         progress(3) + f"Hình: *{s['shape']}* ✅\n\nPhong cách nail?",
-        parse_mode="Markdown",
-        reply_markup=style_kb(),
+        parse_mode="Markdown", reply_markup=style_kb(),
     )
 
 async def show_step4(q, s):
     await q.edit_message_text(
         progress(5) +
-        f"📋 *Tóm tắt lựa chọn:*\n\n"
+        f"📋 *Tóm tắt:*\n\n"
         f"🎨 Chủ đề: *{s.get('theme','').split(',')[0]}*\n"
         f"💅 Hình móng: *{s.get('shape','')}*\n"
         f"✨ Phong cách: *{s.get('style','')}*\n"
         f"🤖 Model: *{model_label(s.get('model','flux'))}*\n\n"
         "Tạo ảnh nail ngay không?",
-        parse_mode="Markdown",
-        reply_markup=confirm_kb(),
+        parse_mode="Markdown", reply_markup=confirm_kb(),
     )
-
-# ── do gen after prompt confirmed ─────────────────────────────────────────────
-async def do_gen(chat_id, prompt: str, mdl: str, uid: int, ctx, caption_extra: str = ""):
-    msg = await ctx.bot.send_message(
-        chat_id=chat_id,
-        text=f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ ~30 giây..."
-    )
-    try:
-        img = await asyncio.to_thread(gen_image, prompt, mdl)
-        sess(uid)["last_prompt"] = prompt
-        sess(uid)["pending_prompt"] = None
-        caption = f"✨ {caption_extra}\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
-        await ctx.bot.send_photo(
-            chat_id=chat_id,
-            photo=io.BytesIO(img),
-            caption=caption,
-            parse_mode="Markdown",
-            reply_markup=RESULT_KB,
-        )
-        await msg.delete()
-    except Exception as e:
-        log.exception(e)
-        await msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
 
 # ── handlers ──────────────────────────────────────────────────────────────────
 async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -418,9 +520,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     s   = sess(uid)
     mdl = s.get("model", "flux")
-    msg = await update.message.reply_text(
-        "🔍 Groq đang phân tích ảnh và viết prompt..."
-    )
+    msg = await update.message.reply_text("🔍 Groq đang phân tích ảnh...")
     try:
         img_bytes = await get_photo_bytes(update.message.photo, ctx)
         prompt    = await asyncio.to_thread(groq_analyze_image, img_bytes)
@@ -437,15 +537,14 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     s = sess(uid)
 
-    # đang ở chế độ edit prompt
+    # đang edit prompt
     if s.get("editing_prompt"):
         s["pending_prompt"] = text
         s["editing_prompt"] = False
         mdl = s.get("model", "flux")
         await update.message.reply_text(
-            f"📝 *Prompt mới của bạn:*\n\n`{text}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nXác nhận?",
-            parse_mode="Markdown",
-            reply_markup=prompt_confirm_kb(),
+            f"📝 *Prompt mới:*\n\n`{text}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nXác nhận?",
+            parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
         )
         return
 
@@ -454,7 +553,7 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     mdl = s.get("model", "flux")
-    msg = await update.message.reply_text("✨ Groq đang viết prompt từ mô tả của bạn...")
+    msg = await update.message.reply_text("✨ Groq đang viết prompt...")
     try:
         prompt = await asyncio.to_thread(groq_write_prompt, text, "almond", "elegant")
         await msg.delete()
@@ -471,8 +570,62 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     s   = sess(uid)
     mdl = s.get("model", "flux")
 
+    # ── Pinterest flow ────────────────────────────────────────────────────────
+    if d == "flow_pinterest":
+        await q.edit_message_text(
+            "📌 Chọn chủ đề nail để tìm trên Pinterest:",
+            reply_markup=pinterest_theme_kb(),
+        )
+
+    elif d in PINTEREST_THEMES:
+        theme_label = PINTEREST_THEMES[d]
+        theme_key   = theme_label.split(" ", 1)[1]  # bỏ emoji
+        await q.edit_message_text(
+            f"🔍 Đang tìm ảnh *{theme_label}* trên Pinterest...",
+            parse_mode="Markdown",
+        )
+        try:
+            # scrape Pinterest
+            img_urls = await asyncio.to_thread(search_pinterest_images, theme_key, 5)
+            if not img_urls:
+                await q.edit_message_text(
+                    f"❌ Không tìm thấy ảnh trên Pinterest cho *{theme_label}*.\n"
+                    f"Thử chủ đề khác nhé!",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("↩️ Chọn lại", callback_data="flow_pinterest")
+                    ]]),
+                )
+                return
+
+            await q.edit_message_text(
+                f"📌 Tìm thấy {len(img_urls)} ảnh!\n🤖 Groq đang phân tích..."
+            )
+
+            # download và phân tích
+            img_bytes_list = []
+            for url in img_urls[:3]:
+                b = await asyncio.to_thread(download_image, url)
+                if b:
+                    img_bytes_list.append(b)
+
+            prompt = await asyncio.to_thread(
+                groq_analyze_pinterest_images, img_bytes_list, theme_key
+            )
+            s["theme"] = theme_key
+
+            await q.message.delete()
+            await show_prompt_preview(
+                q.message.chat_id, prompt, mdl, ctx, uid,
+                pinterest_imgs=img_urls[:3]
+            )
+
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
     # ── prompt actions ────────────────────────────────────────────────────────
-    if d == "prompt_go":
+    elif d == "prompt_go":
         prompt = s.get("pending_prompt")
         if not prompt:
             await show_menu(q, uid)
@@ -480,9 +633,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ ~30 giây...")
         try:
             img = await asyncio.to_thread(gen_image, prompt, mdl)
-            s["last_prompt"] = prompt
+            s["last_prompt"]    = prompt
             s["pending_prompt"] = None
-            caption = f"✨ Đây là ảnh nail của bạn!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
+            caption = f"✨ Đây là ảnh nail!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
             await ctx.bot.send_photo(
                 chat_id=q.message.chat_id,
                 photo=io.BytesIO(img),
@@ -499,7 +652,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         s["editing_prompt"] = True
         await q.edit_message_text(
             f"✏️ *Chỉnh sửa prompt:*\n\nPrompt hiện tại:\n`{s.get('pending_prompt','')}`\n\n"
-            f"Nhắn prompt mới vào đây (tiếng Anh để kết quả tốt nhất):",
+            f"Nhắn prompt mới (tiếng Anh để kết quả tốt nhất):",
             parse_mode="Markdown",
         )
 
@@ -513,8 +666,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             s["pending_prompt"] = new_prompt
             await q.edit_message_text(
                 f"📝 *Prompt mới:*\n\n`{new_prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
-                parse_mode="Markdown",
-                reply_markup=prompt_confirm_kb(),
+                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
             )
         except Exception as e:
             log.exception(e)
@@ -526,7 +678,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_menu(q, uid)
 
     elif d == "choose_model":
-        await q.edit_message_text("🤖 Chọn model AI để gen ảnh nail:", reply_markup=MODEL_KB)
+        await q.edit_message_text("🤖 Chọn model AI:", reply_markup=MODEL_KB)
 
     elif d == "set_flux":
         s["model"] = "flux"
@@ -548,7 +700,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     elif d == "flow_photo":
         await q.edit_message_text(
             "📸 Gửi ảnh nail bạn thích vào đây!\n"
-            f"_Groq sẽ phân tích → hiện prompt → {model_label(mdl)} gen ảnh_ 🎨",
+            f"_Groq sẽ phân tích → {model_label(mdl)} gen ảnh_ 🎨",
             parse_mode="Markdown",
         )
 
@@ -557,47 +709,40 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_step1(q)
 
     elif d == "tab_color":
-        await q.edit_message_text(progress(1) + "Chọn tông màu bạn thích 🎨", reply_markup=COLOR_KB)
+        await q.edit_message_text(progress(1) + "Chọn tông màu 🎨", reply_markup=COLOR_KB)
 
     elif d == "tab_holiday":
         await q.edit_message_text(progress(1) + "Chọn ngày lễ Mỹ 🎉", reply_markup=holiday_kb())
 
     elif d == "back_step1":
-        s["theme"] = None
-        s["step"]  = 1
+        s["theme"] = None; s["step"] = 1
         await show_step1(q)
 
     elif d in COLOR_MAP:
-        s["theme"] = COLOR_MAP[d]
-        s["step"]  = 2
+        s["theme"] = COLOR_MAP[d]; s["step"] = 2
         await show_step2(q, s)
 
     elif d.startswith("hol_"):
         key = d[4:]
         if key in HOLIDAYS:
             label, desc = HOLIDAYS[key]
-            s["theme"] = f"{label}, {desc}"
-            s["step"]  = 2
+            s["theme"] = f"{label}, {desc}"; s["step"] = 2
             await show_step2(q, s)
 
     elif d == "back_step2":
-        s["shape"] = None
-        s["step"]  = 1
+        s["shape"] = None; s["step"] = 1
         await show_step1(q)
 
     elif d in SHAPE_MAP:
-        s["shape"] = SHAPE_MAP[d]
-        s["step"]  = 3
+        s["shape"] = SHAPE_MAP[d]; s["step"] = 3
         await show_step3(q, s)
 
     elif d == "back_step3":
-        s["style"] = None
-        s["step"]  = 2
+        s["style"] = None; s["step"] = 2
         await show_step2(q, s)
 
     elif d in STYLE_MAP:
-        s["style"] = STYLE_MAP[d]
-        s["step"]  = 4
+        s["style"] = STYLE_MAP[d]; s["step"] = 4
         await show_step4(q, s)
 
     elif d == "confirm_gen":
@@ -610,12 +755,11 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 s.get("style", "minimalist"),
             )
             s["step"] = 0
+            s["pending_prompt"] = prompt
             await q.edit_message_text(
                 f"📝 *Prompt Groq đã viết:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
-                parse_mode="Markdown",
-                reply_markup=prompt_confirm_kb(),
+                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
             )
-            s["pending_prompt"] = prompt
         except Exception as e:
             log.exception(e)
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
@@ -627,7 +771,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         await q.edit_message_text(f"🔄 Đang tạo biến tấu bằng {model_label(mdl)}...")
         try:
-            new_prompt = last + ", creative variation, different composition, unique style"
+            new_prompt = last + ", creative variation, different composition"
             img = await asyncio.to_thread(gen_image, new_prompt, mdl)
             s["last_prompt"] = new_prompt
             caption = f"🔄 Biến tấu mới!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{new_prompt[:200]}`"
@@ -654,18 +798,14 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             s["pending_prompt"] = retouched
             await q.edit_message_text(
                 f"📝 *Prompt sau retouch:*\n\n`{retouched}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
-                parse_mode="Markdown",
-                reply_markup=prompt_confirm_kb(),
+                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
             )
         except Exception as e:
             log.exception(e)
             await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
 
     elif d == "tweak":
-        await q.edit_message_text(
-            "🎨 Chọn màu hoặc hình dạng móng muốn thay:",
-            reply_markup=TWEAK_KB,
-        )
+        await q.edit_message_text("🎨 Chọn màu hoặc hình dạng móng muốn thay:", reply_markup=TWEAK_KB)
 
     elif d in TWEAK_MAP:
         tweak_val = TWEAK_MAP[d]
@@ -675,8 +815,7 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             s["pending_prompt"] = prompt
             await q.edit_message_text(
                 f"📝 *Prompt cho {tweak_val}:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
-                parse_mode="Markdown",
-                reply_markup=prompt_confirm_kb(),
+                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
             )
         except Exception as e:
             log.exception(e)
@@ -691,7 +830,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    log.info("🚀 Nail Bot (Groq + FLUX + DALL-E 3) started...")
+    log.info("🚀 Nail Bot (Pinterest + Groq + FLUX) started...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
