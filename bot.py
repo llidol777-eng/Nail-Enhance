@@ -4,9 +4,7 @@ import logging
 import asyncio
 import httpx
 import base64
-import re
 import requests
-from groq import Groq
 from openai import OpenAI
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -17,199 +15,16 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger(__name__)
 
-TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
-HF_TOKEN   = os.environ.get("HF_TOKEN", "")
-GROQ_KEY   = os.environ.get("GROQ_API_KEY", "")
-OPENAI_KEY = os.environ.get("OPENAI_API_KEY", "")
+TOKEN       = os.environ["TELEGRAM_BOT_TOKEN"]
+HF_TOKEN    = os.environ.get("HF_TOKEN", "")
+GLM_KEY     = os.environ.get("GLM_API_KEY", "")
+OPENAI_KEY  = os.environ.get("OPENAI_API_KEY", "")
 
-UNSPLASH_KEY = os.environ.get("UNSPLASH_KEY", "")
-GROQ_CLIENT  = Groq(api_key=GROQ_KEY) if GROQ_KEY else None
-OPENAI       = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
-
-# ── image search via Unsplash API ─────────────────────────────────────────────
-def search_nail_images(query: str, count: int = 5) -> list[str]:
-    """Tìm ảnh nail qua Unsplash API"""
-    if not UNSPLASH_KEY:
-        return []
-    url = "https://api.unsplash.com/search/photos"
-    params = {
-        "query": f"{query} nail art",
-        "per_page": count,
-        "orientation": "portrait",
-    }
-    headers = {"Authorization": f"Client-ID {UNSPLASH_KEY}"}
-    try:
-        r = requests.get(url, headers=headers, params=params, timeout=15)
-        if r.status_code != 200:
-            log.warning(f"Unsplash API error: {r.status_code}")
-            return []
-        data = r.json()
-        return [
-            item["urls"]["regular"]
-            for item in data.get("results", [])
-            if item.get("urls", {}).get("regular")
-        ][:count]
-    except Exception as e:
-        log.warning(f"Unsplash search failed: {e}")
-        return []
-
-def download_image_bytes(url: str) -> bytes | None:
-    try:
-        r = requests.get(url, timeout=15)
-        if r.status_code == 200 and len(r.content) > 5000:
-            return r.content
-        return None
-    except Exception:
-        return None
-
-# ── Groq helpers ──────────────────────────────────────────────────────────────
-def groq_write_prompt(theme: str, shape: str = "almond", style: str = "elegant") -> str:
-    if not GROQ_CLIENT:
-        return (
-            f"beautiful woman's hand with {style} nail art, {theme} color, "
-            f"{shape} shaped nails, gel nails, elegant pose, studio lighting, "
-            f"white background, high quality, 4k, photorealistic"
-        )
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": (
-            f"Write a detailed image generation prompt for nail art photography. "
-            f"Theme/color: {theme}, nail shape: {shape}, style: {style}. "
-            f"Must include: beautiful woman's hand, gel nails, elegant pose, "
-            f"studio lighting, white background, photorealistic, high quality. "
-            f"Return ONLY the prompt, max 70 words, English. No quotes."
-        )}],
-        max_tokens=150, temperature=0.7,
-    )
-    return resp.choices[0].message.content.strip()
-
-def groq_analyze_image(image_bytes: bytes) -> str:
-    if not GROQ_CLIENT:
-        return "nail art design, beautiful woman's hand, gel nails, studio lighting"
-    b64 = base64.b64encode(image_bytes).decode()
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="meta-llama/llama-4-scout-17b-16e-instruct",
-        messages=[{"role": "user", "content": [
-            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-            {"type": "text", "text": (
-                "Analyze this nail art image. Write a detailed image generation prompt "
-                "to recreate similar nail art on a beautiful woman's hand. "
-                "Include colors, patterns, nail shape, style, finish, elegant pose, "
-                "studio lighting, white background, photorealistic. "
-                "Return ONLY the prompt, max 70 words, English. No quotes."
-            )}
-        ]}],
-        max_tokens=150,
-    )
-    return resp.choices[0].message.content.strip()
-
-def groq_analyze_multiple_images(image_bytes_list: list[bytes], theme: str) -> str:
-    """Phân tích nhiều ảnh tham khảo → tổng hợp 1 prompt"""
-    if not GROQ_CLIENT or not image_bytes_list:
-        return groq_write_prompt(theme)
-
-    analyses = []
-    for img_bytes in image_bytes_list[:3]:
-        try:
-            b64 = base64.b64encode(img_bytes).decode()
-            resp = GROQ_CLIENT.chat.completions.create(
-                model="meta-llama/llama-4-scout-17b-16e-instruct",
-                messages=[{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                    {"type": "text", "text": "Describe this nail art briefly: colors, shape, decorative elements, finish. Max 30 words."}
-                ]}],
-                max_tokens=60,
-            )
-            analyses.append(resp.choices[0].message.content.strip())
-        except Exception as e:
-            log.warning(f"Image analysis failed: {e}")
-
-    if not analyses:
-        return groq_write_prompt(theme)
-
-    combined = " | ".join(analyses)
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": (
-            f"Based on these nail art descriptions for theme '{theme}':\n{combined}\n\n"
-            f"Write ONE detailed image generation prompt combining the best elements. "
-            f"Include: beautiful woman's hand, gel nails, elegant pose, "
-            f"studio lighting, white background, photorealistic, high quality, 4k. "
-            f"Max 70 words, English only, no quotes."
-        )}],
-        max_tokens=150, temperature=0.7,
-    )
-    return resp.choices[0].message.content.strip()
-
-def groq_retouch_prompt(original_prompt: str) -> str:
-    if not GROQ_CLIENT:
-        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
-    resp = GROQ_CLIENT.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[{"role": "user", "content": (
-            f"Improve this nail art prompt to fix AI issues (deformed fingers, unrealistic nails). "
-            f"Add: perfect realistic fingers, flawless nail art, professional photography. "
-            f"Original: {original_prompt}. "
-            f"Return ONLY improved prompt, max 80 words, English. No quotes."
-        )}],
-        max_tokens=150, temperature=0.5,
-    )
-    return resp.choices[0].message.content.strip()
-
-# ── image gen ─────────────────────────────────────────────────────────────────
-def gen_flux(prompt: str) -> bytes:
-    import time
-    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
-    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
-    payload = {"inputs": prompt + ", perfect fingers, realistic hands, no deformity"}
-    for attempt in range(3):
-        r = requests.post(API_URL, headers=headers, json=payload, timeout=120)
-        if r.status_code == 200:
-            return r.content
-        log.warning(f"FLUX attempt {attempt+1}: {r.status_code}")
-        time.sleep(15)
-    raise Exception(f"FLUX error: {r.status_code}")
-
-def gen_dalle(prompt: str) -> bytes:
-    if not OPENAI:
-        raise Exception("Chưa có OpenAI API key!")
-    resp = OPENAI.images.generate(
-        model="dall-e-3",
-        prompt=prompt + ", perfect fingers, realistic hands, professional nail photography",
-        size="1024x1024", quality="standard", n=1,
-    )
-    r = httpx.get(resp.data[0].url)
-    return r.content
-
-def gen_image(prompt: str, model: str) -> bytes:
-    return gen_dalle(prompt) if model == "dalle" else gen_flux(prompt)
-
-async def get_photo_bytes(photo, ctx) -> bytes:
-    file = await ctx.bot.get_file(photo[-1].file_id)
-    async with httpx.AsyncClient() as c:
-        r = await c.get(file.file_path)
-    return r.content
+# ── AI clients ────────────────────────────────────────────────────────────────
+GLM_CLIENT    = OpenAI(api_key=GLM_KEY,    base_url="https://open.bigmodel.cn/api/paas/v4/") if GLM_KEY else None
+OPENAI_CLIENT = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
 
 # ── data maps ─────────────────────────────────────────────────────────────────
-PINTEREST_THEMES = {
-    "pt_cherry":    "🌸 Cherry Blossom",
-    "pt_marble":    "🌀 Marble",
-    "pt_french":    "🤍 French Tip",
-    "pt_glitter":   "✨ Glitter",
-    "pt_ombre":     "🎨 Ombre",
-    "pt_floral":    "🌺 Floral",
-    "pt_minimal":   "🕊 Minimalist",
-    "pt_chrome":    "💿 Chrome",
-    "pt_3d":        "🌟 3D Nail",
-    "pt_halloween": "🎃 Halloween",
-    "pt_xmas":      "🎄 Christmas",
-    "pt_valentine": "💝 Valentine",
-    "pt_summer":    "☀️ Summer",
-    "pt_pastel":    "🌷 Pastel",
-    "pt_korean":    "🇰🇷 Korean Style",
-    "pt_vintage":   "🕰 Vintage",
-}
-
 HOLIDAYS = {
     "h01": ("❄️ New Year's Day",    "silver glitter, countdown, midnight sparkle"),
     "h02": ("💝 Valentine's Day",   "red pink hearts, roses, romantic love"),
@@ -278,47 +93,141 @@ def sess(uid: int) -> dict:
     if uid not in SESSIONS:
         SESSIONS[uid] = {
             "step": 0, "theme": None, "shape": None, "style": None,
-            "last_prompt": None, "model": "flux",
+            "last_prompt": None, "model": "gptimage2",
             "pending_prompt": None, "editing_prompt": False,
-            "pinterest_mode": False,
         }
     return SESSIONS[uid]
 
 def reset(uid: int):
-    model = sess(uid).get("model", "flux")
+    model = sess(uid).get("model", "gptimage2")
     SESSIONS[uid] = {
         "step": 0, "theme": None, "shape": None, "style": None,
         "last_prompt": None, "model": model,
         "pending_prompt": None, "editing_prompt": False,
-        "pinterest_mode": False,
     }
 
 def progress(step: int) -> str:
     return "".join(["▓" if i < step else "░" for i in range(5)]) + f" Bước {step}/5\n\n"
 
 def model_label(model: str) -> str:
-    return "⭐ DALL-E 3" if model == "dalle" else "🆓 FLUX.1"
+    if model == "gptimage2":
+        return "⭐ GPT Image 2"
+    return "🆓 FLUX.1"
+
+# ── GLM-4 helpers ─────────────────────────────────────────────────────────────
+def glm_write_prompt(theme: str, shape: str = "almond", style: str = "elegant") -> str:
+    if not GLM_CLIENT:
+        return (
+            f"beautiful woman's hand with {style} nail art, {theme} color, "
+            f"{shape} shaped nails, gel nails, elegant pose, studio lighting, "
+            f"white background, high quality, 4k, photorealistic"
+        )
+    resp = GLM_CLIENT.chat.completions.create(
+        model="glm-4-flash",
+        messages=[{"role": "user", "content": (
+            f"Write a detailed image generation prompt for nail art photography. "
+            f"Theme/color: {theme}, nail shape: {shape}, style: {style}. "
+            f"Must include: beautiful woman's hand, gel nails, elegant pose, "
+            f"studio lighting, white background, photorealistic, high quality. "
+            f"Return ONLY the prompt, max 70 words, English. No quotes."
+        )}],
+        max_tokens=150,
+        temperature=0.7,
+    )
+    return resp.choices[0].message.content.strip()
+
+def glm_analyze_image(image_bytes: bytes) -> str:
+    if not GLM_CLIENT:
+        return "nail art design, beautiful woman's hand, gel nails, studio lighting"
+    b64 = base64.b64encode(image_bytes).decode()
+    resp = GLM_CLIENT.chat.completions.create(
+        model="glm-4v-flash",
+        messages=[{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
+            {"type": "text", "text": (
+                "Analyze this nail art image. Write a detailed image generation prompt "
+                "to recreate similar nail art on a beautiful woman's hand. "
+                "Include colors, patterns, nail shape, style, finish, elegant pose, "
+                "studio lighting, white background, photorealistic. "
+                "Return ONLY the prompt, max 70 words, English. No quotes."
+            )}
+        ]}],
+        max_tokens=150,
+    )
+    return resp.choices[0].message.content.strip()
+
+def glm_retouch_prompt(original_prompt: str) -> str:
+    if not GLM_CLIENT:
+        return original_prompt + ", perfect nails, flawless nail art, no distortion, realistic fingers"
+    resp = GLM_CLIENT.chat.completions.create(
+        model="glm-4-flash",
+        messages=[{"role": "user", "content": (
+            f"Improve this nail art prompt to fix AI issues (deformed fingers, unrealistic nails). "
+            f"Add: perfect realistic fingers, flawless nail art, professional photography. "
+            f"Original: {original_prompt}. "
+            f"Return ONLY improved prompt, max 80 words, English. No quotes."
+        )}],
+        max_tokens=150, temperature=0.5,
+    )
+    return resp.choices[0].message.content.strip()
+
+# ── image gen ─────────────────────────────────────────────────────────────────
+def gen_gptimage2(prompt: str) -> bytes:
+    if not OPENAI_CLIENT:
+        raise Exception("Chưa có OpenAI API key!")
+    resp = OPENAI_CLIENT.images.generate(
+        model="gpt-image-1",
+        prompt=prompt + ", perfect fingers, realistic hands, professional nail photography",
+        size="1024x1024",
+        quality="medium",
+        n=1,
+    )
+    # gpt-image-1 trả về base64
+    img_data = resp.data[0]
+    if hasattr(img_data, 'b64_json') and img_data.b64_json:
+        return base64.b64decode(img_data.b64_json)
+    elif hasattr(img_data, 'url') and img_data.url:
+        r = httpx.get(img_data.url)
+        return r.content
+    raise Exception("Không lấy được ảnh từ GPT Image 2")
+
+def gen_flux(prompt: str) -> bytes:
+    import time
+    API_URL = "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-schnell"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {"inputs": prompt + ", perfect fingers, realistic hands, no deformity"}
+    for attempt in range(3):
+        r = requests.post(API_URL, headers=headers, json=payload, timeout=120)
+        if r.status_code == 200:
+            return r.content
+        log.warning(f"FLUX attempt {attempt+1}: {r.status_code}")
+        time.sleep(15)
+    raise Exception(f"FLUX error: {r.status_code}")
+
+def gen_image(prompt: str, model: str) -> bytes:
+    if model == "gptimage2":
+        return gen_gptimage2(prompt)
+    return gen_flux(prompt)
+
+async def get_photo_bytes(photo, ctx) -> bytes:
+    file = await ctx.bot.get_file(photo[-1].file_id)
+    async with httpx.AsyncClient() as c:
+        r = await c.get(file.file_path)
+    return r.content
 
 # ── keyboards ─────────────────────────────────────────────────────────────────
 def start_kb(model: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔍 Tìm mẫu tham khảo",            callback_data="flow_pinterest")],
         [InlineKeyboardButton("📸 Gửi ảnh nail mẫu",             callback_data="flow_photo")],
         [InlineKeyboardButton("✍️ Tạo từ lựa chọn",              callback_data="flow_text")],
         [InlineKeyboardButton(f"⚙️ Model: {model_label(model)}", callback_data="choose_model")],
     ])
 
-def pinterest_theme_kb() -> InlineKeyboardMarkup:
-    rows = []
-    keys = list(PINTEREST_THEMES.keys())
-    for i in range(0, len(keys), 2):
-        row = []
-        for k in keys[i:i+2]:
-            row.append(InlineKeyboardButton(PINTEREST_THEMES[k], callback_data=k))
-        rows.append(row)
-    rows.append([InlineKeyboardButton("✏️ Nhập chủ đề khác", callback_data="pt_custom")])
-    rows.append([InlineKeyboardButton("↩️ Quay lại",          callback_data="menu_main")])
-    return InlineKeyboardMarkup(rows)
+MODEL_KB = InlineKeyboardMarkup([
+    [InlineKeyboardButton("⭐ GPT Image 2 — Đẹp nhất, ~10s",    callback_data="set_gptimage2")],
+    [InlineKeyboardButton("🆓 FLUX.1 — Miễn phí, ~60s",         callback_data="set_flux")],
+    [InlineKeyboardButton("↩️ Quay lại",                         callback_data="menu_main")],
+])
 
 def prompt_confirm_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
@@ -327,12 +236,6 @@ def prompt_confirm_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🔄 Viết lại prompt",   callback_data="prompt_regen")],
         [InlineKeyboardButton("🏠 Huỷ",               callback_data="new")],
     ])
-
-MODEL_KB = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🆓 FLUX.1 — Miễn phí, ~30s",           callback_data="set_flux")],
-    [InlineKeyboardButton("⭐ DALL-E 3 — Trả phí, ~10s, đẹp hơn", callback_data="set_dalle")],
-    [InlineKeyboardButton("↩️ Quay lại",                           callback_data="menu_main")],
-])
 
 STEP1_KB = InlineKeyboardMarkup([
     [InlineKeyboardButton("🎨 Chọn tông màu",        callback_data="tab_color")],
@@ -416,27 +319,13 @@ TWEAK_KB = InlineKeyboardMarkup([
 ])
 
 # ── show prompt preview ───────────────────────────────────────────────────────
-async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int, ref_imgs: list = None):
+async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int):
     sess(uid)["pending_prompt"] = prompt
     sess(uid)["editing_prompt"] = False
-
-    if ref_imgs:
-        sent = 0
-        for img_url in ref_imgs[:3]:
-            try:
-                await ctx.bot.send_photo(
-                    chat_id=chat_id, photo=img_url,
-                    caption="📸 Ảnh tham khảo" if sent == 0 else None,
-                )
-                sent += 1
-                await asyncio.sleep(0.5)
-            except Exception:
-                continue
-
     await ctx.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"📝 *Prompt AI đã viết:*\n\n"
+            f"📝 *Prompt GLM-4 đã viết:*\n\n"
             f"`{prompt}`\n\n"
             f"🤖 Gen bằng: *{model_label(mdl)}*\n\n"
             f"Bạn muốn làm gì?"
@@ -444,48 +333,6 @@ async def show_prompt_preview(chat_id, prompt: str, mdl: str, ctx, uid: int, ref
         parse_mode="Markdown",
         reply_markup=prompt_confirm_kb(),
     )
-
-# ── Pinterest search flow ─────────────────────────────────────────────────────
-async def do_pinterest_search(chat_id, theme: str, mdl: str, uid: int, ctx, status_msg=None):
-    # luôn tạo message mới để tránh lỗi "Message is not modified"
-    new_msg = await ctx.bot.send_message(chat_id=chat_id, text=f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
-    if status_msg:
-        try:
-            await status_msg.delete()
-        except Exception:
-            pass
-    try:
-        img_urls = await asyncio.to_thread(search_nail_images, theme, 5)
-
-        img_bytes_list = []
-        if img_urls:
-            for url in img_urls[:3]:
-                b = await asyncio.to_thread(download_image_bytes, url)
-                if b:
-                    img_bytes_list.append(b)
-
-        found = len(img_bytes_list)
-        await new_msg.edit_text(f"✅ Tìm thấy {found} ảnh!\n🤖 Groq đang phân tích...")
-
-        if img_bytes_list:
-            prompt = await asyncio.to_thread(groq_analyze_multiple_images, img_bytes_list, theme)
-        else:
-            prompt = await asyncio.to_thread(groq_write_prompt, theme)
-
-        sess(uid)["theme"] = theme
-        await new_msg.delete()
-
-        await show_prompt_preview(
-            chat_id, prompt, mdl, ctx, uid,
-            ref_imgs=img_urls[:3] if img_urls else None,
-        )
-
-    except Exception as e:
-        log.exception(e)
-        try:
-            await new_msg.edit_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
-        except Exception:
-            pass
 
 # ── show steps ────────────────────────────────────────────────────────────────
 async def show_menu(q, uid: int):
@@ -517,7 +364,7 @@ async def show_step4(q, s):
         f"🎨 Chủ đề: *{s.get('theme','').split(',')[0]}*\n"
         f"💅 Hình móng: *{s.get('shape','')}*\n"
         f"✨ Phong cách: *{s.get('style','')}*\n"
-        f"🤖 Model: *{model_label(s.get('model','flux'))}*\n\n"
+        f"🤖 Model: *{model_label(s.get('model','gptimage2'))}*\n\n"
         "Tạo ảnh nail ngay không?",
         parse_mode="Markdown", reply_markup=confirm_kb(),
     )
@@ -538,14 +385,11 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     s   = sess(uid)
-    mdl = s.get("model", "flux")
-    msg = await update.message.reply_text("🔍 Groq đang phân tích ảnh...")
+    mdl = s.get("model", "gptimage2")
+    msg = await update.message.reply_text("🔍 GLM-4 đang phân tích ảnh...")
     try:
-        file = await ctx.bot.get_file(update.message.photo[-1].file_id)
-        async with httpx.AsyncClient() as c:
-            r = await c.get(file.file_path)
-        img_bytes = r.content
-        prompt = await asyncio.to_thread(groq_analyze_image, img_bytes)
+        img_bytes = await get_photo_bytes(update.message.photo, ctx)
+        prompt    = await asyncio.to_thread(glm_analyze_image, img_bytes)
         await msg.delete()
         await show_prompt_preview(update.effective_chat.id, prompt, mdl, ctx, uid)
     except Exception as e:
@@ -558,18 +402,8 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if text.startswith("/"):
         return
     s   = sess(uid)
-    mdl = s.get("model", "flux")
+    mdl = s.get("model", "gptimage2")
 
-    # đang chờ nhập chủ đề Pinterest
-    if s.get("pinterest_mode"):
-        s["pinterest_mode"] = False
-        msg = await update.message.reply_text(
-            f"🔍 Đang tìm ảnh *{text}* nail...", parse_mode="Markdown"
-        )
-        await do_pinterest_search(update.effective_chat.id, text, mdl, uid, ctx, msg)
-        return
-
-    # đang edit prompt
     if s.get("editing_prompt"):
         s["pending_prompt"] = text
         s["editing_prompt"] = False
@@ -583,10 +417,9 @@ async def handle_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Bạn hãy chọn một trong các nút bên trên nhé 👆")
         return
 
-    # free text → viết prompt
-    msg = await update.message.reply_text("✨ Groq đang viết prompt...")
+    msg = await update.message.reply_text("✨ GLM-4 đang viết prompt...")
     try:
-        prompt = await asyncio.to_thread(groq_write_prompt, text)
+        prompt = await asyncio.to_thread(glm_write_prompt, text)
         await msg.delete()
         await show_prompt_preview(update.effective_chat.id, prompt, mdl, ctx, uid)
     except Exception as e:
@@ -599,85 +432,24 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d   = q.data
     await q.answer()
     s   = sess(uid)
-    mdl = s.get("model", "flux")
+    mdl = s.get("model", "gptimage2")
 
-    # ── Pinterest ─────────────────────────────────────────────────────────────
-    if d == "flow_pinterest":
-        await q.edit_message_text(
-            "🔍 Chọn chủ đề nail để tìm ảnh tham khảo:",
-            reply_markup=pinterest_theme_kb(),
-        )
-
-    elif d == "pt_custom":
-        s["pinterest_mode"] = True
-        await q.edit_message_text(
-            "✏️ Nhập chủ đề nail bạn muốn tìm:\n\n"
-            "VD: *butterfly*, *galaxy*, *tropical*, *cherry blossom*, *geometric*...\n\n"
-            "_(Tiếng Anh hoặc tiếng Việt đều được)_",
-            parse_mode="Markdown",
-        )
-
-    elif d in PINTEREST_THEMES:
-        theme = PINTEREST_THEMES[d].split(" ", 1)[1]
-        await q.edit_message_text(f"🔍 Đang tìm ảnh *{theme}* nail...", parse_mode="Markdown")
-        await do_pinterest_search(q.message.chat_id, theme, mdl, uid, ctx, q.message)
-
-    # ── prompt actions ────────────────────────────────────────────────────────
-    elif d == "prompt_go":
-        prompt = s.get("pending_prompt")
-        if not prompt:
-            await show_menu(q, uid)
-            return
-        await q.edit_message_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ ~30 giây...")
-        try:
-            img = await asyncio.to_thread(gen_image, prompt, mdl)
-            s["last_prompt"]    = prompt
-            s["pending_prompt"] = None
-            caption = f"✨ Đây là ảnh nail!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
-            await ctx.bot.send_photo(
-                chat_id=q.message.chat_id,
-                photo=io.BytesIO(img),
-                caption=caption, parse_mode="Markdown",
-                reply_markup=RESULT_KB,
-            )
-            await q.message.delete()
-        except Exception as e:
-            log.exception(e)
-            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
-
-    elif d == "prompt_edit":
-        s["editing_prompt"] = True
-        await q.edit_message_text(
-            f"✏️ *Chỉnh sửa prompt:*\n\nHiện tại:\n`{s.get('pending_prompt','')}`\n\n"
-            f"Nhắn prompt mới (tiếng Anh để kết quả tốt nhất):",
-            parse_mode="Markdown",
-        )
-
-    elif d == "prompt_regen":
-        await q.edit_message_text("🔄 Groq đang viết lại prompt mới...")
-        try:
-            new_prompt = await asyncio.to_thread(
-                groq_write_prompt,
-                s.get("theme", "elegant nail art"),
-                s.get("shape", "almond"),
-                s.get("style", "minimalist"),
-            )
-            s["pending_prompt"] = new_prompt
-            await q.edit_message_text(
-                f"📝 *Prompt mới:*\n\n`{new_prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
-                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
-            )
-        except Exception as e:
-            log.exception(e)
-            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
-
-    # ── menu ──────────────────────────────────────────────────────────────────
-    elif d in ("menu_main", "new"):
+    if d in ("menu_main", "new"):
         reset(uid)
         await show_menu(q, uid)
 
     elif d == "choose_model":
-        await q.edit_message_text("🤖 Chọn model AI:", reply_markup=MODEL_KB)
+        await q.edit_message_text("🤖 Chọn model gen ảnh:", reply_markup=MODEL_KB)
+
+    elif d == "set_gptimage2":
+        if not OPENAI_CLIENT:
+            await q.answer("⚠️ Chưa có OpenAI API key!", show_alert=True)
+            return
+        s["model"] = "gptimage2"
+        await q.edit_message_text(
+            "✅ Đã chọn *GPT Image 2*!\n\nBạn muốn tạo mẫu nail theo cách nào?",
+            parse_mode="Markdown", reply_markup=start_kb("gptimage2"),
+        )
 
     elif d == "set_flux":
         s["model"] = "flux"
@@ -686,20 +458,10 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown", reply_markup=start_kb("flux"),
         )
 
-    elif d == "set_dalle":
-        if not OPENAI:
-            await q.answer("⚠️ Chưa có OpenAI API key!", show_alert=True)
-            return
-        s["model"] = "dalle"
-        await q.edit_message_text(
-            "✅ Đã chọn *DALL-E 3* — chất lượng cao!\n\nBạn muốn tạo mẫu nail theo cách nào?",
-            parse_mode="Markdown", reply_markup=start_kb("dalle"),
-        )
-
     elif d == "flow_photo":
         await q.edit_message_text(
             "📸 Gửi ảnh nail bạn thích vào đây!\n"
-            f"_Groq phân tích → {model_label(mdl)} gen ảnh_ 🎨",
+            f"_GLM-4 phân tích → {model_label(mdl)} gen ảnh_ 🎨",
             parse_mode="Markdown",
         )
 
@@ -745,17 +507,63 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_step4(q, s)
 
     elif d == "confirm_gen":
-        await q.edit_message_text("⏳ Groq đang viết prompt...")
+        await q.edit_message_text("⏳ GLM-4 đang viết prompt...")
         try:
             prompt = await asyncio.to_thread(
-                groq_write_prompt,
+                glm_write_prompt,
                 s.get("theme", "elegant nail art"),
                 s.get("shape", "almond"),
                 s.get("style", "minimalist"),
             )
             s["step"] = 0; s["pending_prompt"] = prompt
             await q.edit_message_text(
-                f"📝 *Prompt Groq đã viết:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
+                f"📝 *Prompt GLM-4 đã viết:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
+                parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
+            )
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
+    elif d == "prompt_go":
+        prompt = s.get("pending_prompt")
+        if not prompt:
+            await show_menu(q, uid); return
+        await q.edit_message_text(f"🎨 Đang gen ảnh bằng {model_label(mdl)}, chờ nhé...")
+        try:
+            img = await asyncio.to_thread(gen_image, prompt, mdl)
+            s["last_prompt"] = prompt; s["pending_prompt"] = None
+            caption = f"✨ Đây là ảnh nail!\n🤖 {model_label(mdl)}\n\n📝 *Prompt:*\n`{prompt[:200]}`"
+            await ctx.bot.send_photo(
+                chat_id=q.message.chat_id,
+                photo=io.BytesIO(img),
+                caption=caption, parse_mode="Markdown",
+                reply_markup=RESULT_KB,
+            )
+            await q.message.delete()
+        except Exception as e:
+            log.exception(e)
+            await q.edit_message_text(f"❌ Lỗi: {str(e)[:120]}\n\nThử lại nhé!")
+
+    elif d == "prompt_edit":
+        s["editing_prompt"] = True
+        await q.edit_message_text(
+            f"✏️ *Chỉnh sửa prompt:*\n\nHiện tại:\n`{s.get('pending_prompt','')}`\n\n"
+            f"Nhắn prompt mới (tiếng Anh để kết quả tốt nhất):",
+            parse_mode="Markdown",
+        )
+
+    elif d == "prompt_regen":
+        await q.edit_message_text("🔄 GLM-4 đang viết lại prompt...")
+        try:
+            new_prompt = await asyncio.to_thread(
+                glm_write_prompt,
+                s.get("theme", "elegant nail art"),
+                s.get("shape", "almond"),
+                s.get("style", "minimalist"),
+            )
+            s["pending_prompt"] = new_prompt
+            await q.edit_message_text(
+                f"📝 *Prompt mới:*\n\n`{new_prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
                 parse_mode="Markdown", reply_markup=prompt_confirm_kb(),
             )
         except Exception as e:
@@ -785,9 +593,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         last = s.get("last_prompt")
         if not last:
             await show_menu(q, uid); return
-        await q.edit_message_text("✨ Groq đang retouch prompt...")
+        await q.edit_message_text("✨ GLM-4 đang retouch prompt...")
         try:
-            retouched = await asyncio.to_thread(groq_retouch_prompt, last)
+            retouched = await asyncio.to_thread(glm_retouch_prompt, last)
             s["pending_prompt"] = retouched
             await q.edit_message_text(
                 f"📝 *Prompt sau retouch:*\n\n`{retouched}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
@@ -802,9 +610,9 @@ async def handle_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     elif d in TWEAK_MAP:
         tweak_val = TWEAK_MAP[d]
-        await q.edit_message_text(f"🎨 Groq đang viết prompt cho *{tweak_val}*...", parse_mode="Markdown")
+        await q.edit_message_text(f"🎨 GLM-4 đang viết prompt cho *{tweak_val}*...", parse_mode="Markdown")
         try:
-            prompt = await asyncio.to_thread(groq_write_prompt, tweak_val)
+            prompt = await asyncio.to_thread(glm_write_prompt, tweak_val)
             s["pending_prompt"] = prompt
             await q.edit_message_text(
                 f"📝 *Prompt cho {tweak_val}:*\n\n`{prompt}`\n\n🤖 Gen bằng: *{model_label(mdl)}*\n\nBạn muốn làm gì?",
@@ -823,7 +631,7 @@ def main():
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_handler(CallbackQueryHandler(handle_callback))
-    log.info("🚀 Nail Bot (Groq + FLUX + Pinterest Search) started...")
+    log.info("🚀 Nail Bot (GLM-4 + GPT Image 2) started...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
